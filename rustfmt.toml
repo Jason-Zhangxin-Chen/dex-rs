@@ -1,0 +1,18 @@
+# rustfmt – opinionated formatting shared by the whole workspace.
+# `cargo fmt --all` is expected to pass before every commit.
+
+edition = "2024"               # matches the workspace crate editions
+max_width = 100                # wider than default (100 vs 80) for modern screens
+hard_tabs = false
+tab_spaces = 4
+
+# Import organisation
+reorder_imports = true
+reorder_modules = true
+
+# Expression formatting
+use_small_heuristics = "Max"
+match_arm_leading_pipes = "Never"
+
+# Compactness
+newline_style = "Unix"

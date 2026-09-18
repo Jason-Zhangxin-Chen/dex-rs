@@ -1,0 +1,8 @@
+[toolchain]
+# Rust 1.91.0 is the first release that stabilises edition 2024, which every
+# crate and service in this workspace uses.  Pin here so CI and local dev stay
+# in lockstep.
+channel = "1.91.0"
+profile = "minimal"
+components = ["clippy", "rustfmt", "rust-analyzer"]
+targets = ["x86_64-unknown-linux-gnu"]

@@ -1,0 +1,153 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  merge_group:
+    types: [checks_requested]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # ------------------------------------------------------------------
+  # Build + test matrix — cheap signal first; also catches
+  # compilation errors that clippy alone would miss on non-default
+  # feature combinations.
+  # ------------------------------------------------------------------
+  build-and-test:
+    name: Build & test (Rust ${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ["1.91.0"] # pinned to match rust-toolchain.toml
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: clippy, rustfmt
+
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "build"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Build workspace
+        run: cargo build --workspace --locked
+
+      - name: Run tests
+        run: cargo nextest run --workspace
+
+  # ------------------------------------------------------------------
+  # Lint
+  # ------------------------------------------------------------------
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.91.0"
+          components: clippy
+
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "clippy"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  # ------------------------------------------------------------------
+  # Format
+  # ------------------------------------------------------------------
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.91.0"
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  # ------------------------------------------------------------------
+  # License / advisory audit
+  # ------------------------------------------------------------------
+  cargo-deny:
+    name: Cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.91.0"
+
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "deny"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Run cargo deny check
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  # ------------------------------------------------------------------
+  # Gate — a single required status check that depends on every
+  # individual job above.  Branch-protection rules only need to
+  # require this one check.
+  # ------------------------------------------------------------------
+  all-checks:
+    name: All checks
+    if: always()
+    needs: [build-and-test, clippy, fmt, cargo-deny]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all success
+        run: |
+          cat << 'EOF' | tee "$GITHUB_STEP_SUMMARY"
+          | Job             | Result      |
+          |-----------------|-------------|
+          | build-and-test  | ${{ needs.build-and-test.result }} |
+          | clippy          | ${{ needs.clippy.result }} |
+          | fmt             | ${{ needs.fmt.result }} |
+          | cargo-deny      | ${{ needs.cargo-deny.result }} |
+          EOF
+
+          FAILED="$(
+            for r in \
+              "${{ needs.build-and-test.result }}" \
+              "${{ needs.clippy.result }}" \
+              "${{ needs.fmt.result }}" \
+              "${{ needs.cargo-deny.result }}"
+            do
+              [ "$r" = "success" ] || [ "$r" = "skipped" ] || echo "$r"
+            done
+          )"
+          [ -z "$FAILED" ] || { echo "At least one job failed: $FAILED"; exit 1; }

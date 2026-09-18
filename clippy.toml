@@ -1,0 +1,35 @@
+# clippy – lint-configuration knobs that are not expressible as
+# #[allow(…)] attributes.  The main lint-level decisions live in each
+# crate's lib.rs / main.rs; this file is for numeric thresholds and
+# allow-lists that clippy reads at compile time.
+
+# --- Cognitive complexity ---------------------------------------------------
+# Default is 25.  A DEX order-book implementation is inherently complex, but
+# individual functions should still be kept under control.
+cognitive-complexity-threshold = 30
+
+# --- Type complexity --------------------------------------------------------
+# Default is 250.  Raise slightly because generic lock-free data structures
+# can produce longer type signatures.
+type-complexity-threshold = 400
+
+# --- Large / variant-size difference thresholds -----------------------------
+# Defaults: enum-variant-size-threshold = 200, large-error-threshold = 128.
+# Keep defaults for now — they are sensible general-purpose values.
+
+# --- Allowed identifiers ----------------------------------------------------
+# Crates in this workspace use snake_case for modules and UpperCamelCase for
+# types.  No exceptions needed at workspace level.
+
+# --- Doc-valid-idents -------------------------------------------------------
+# Words that clippy should not flag in doc-comments, e.g. domain terms.
+doc-valid-idents = [
+    "DEX", "DeFi", "Redpanda", "Protobuf", "gRPC", "Kafka", "Redis",
+    "OrderBook", "PriceLevel", "Merkle", "BTree", "Oms", "Utxo",
+    "Mempool", "Sequencer", "Validator", "WebSocket", "REST",
+]
+
+# --- Allowed disallowed-types -----------------------------------------------
+# The core crate must stay executor-agnostic (no tokio types in public
+# signatures).  That is enforced with #[deny(clippy::disallowed_types)] in
+# core/src/lib.rs rather than here.
