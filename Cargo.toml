@@ -1,3 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/cache", "crates/codec", "crates/cryptography","crates/net", "crates/primitives", "crates/storage", "crates/svd-oms", "crates/svd-posttrade", "crates/svd-pretrade", "crates/svd-settle", "crates/svd-settle", "crates/svd-sync", "crates/util"]
+
+[workspace.dependencies]
+alloy = "2.4.2"
+solana-sdk = "5.0.0"

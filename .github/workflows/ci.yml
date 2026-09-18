@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    branches: [main]
   pull_request:
-    branches: [master]
+    branches: [main]
   merge_group:
     types: [checks_requested]
 
@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        toolchain: ["1.91.0"] # pinned to match rust-toolchain.toml
+        toolchain: ["1.94.1"] # pinned to match rust-toolchain.toml
     steps:
       - uses: actions/checkout@v7
 
@@ -63,7 +63,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.91.0"
+          toolchain: "1.94.1"
           components: clippy
 
       - name: Cache Rust build artefacts
@@ -87,7 +87,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.91.0"
+          toolchain: "1.94.1"
           components: rustfmt
 
       - name: Check formatting
@@ -105,7 +105,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.91.0"
+          toolchain: "1.94.1"
 
       - name: Cache Rust build artefacts
         uses: Swatinem/rust-cache@v2
