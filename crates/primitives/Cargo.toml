@@ -2,10 +2,9 @@
 name = "primitives"
 version = "0.1.0"
 edition = "2024"
-
+license = "Apache-2.0"
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
-rmpv = "1.3.1"
 
 [dev-dependencies]
 alloy = {workspace = true}
