@@ -5,3 +5,4 @@ members = ["crates/cache", "crates/codec", "crates/cryptography","crates/net", "
 [workspace.dependencies]
 alloy = "2.4.2"
 solana-sdk = "5.0.0"
+serde = "1.0.229"

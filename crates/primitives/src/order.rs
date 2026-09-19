@@ -1,15 +1,15 @@
 //! The definition of orders
 
 use crate::address::Address;
-use crate::base::{Hash32, Nonce, PegReferenceType, Side};
+use crate::base::{Hash32, Nonce, PegReferenceType, Side, Symbol};
 use crate::signature::Signature;
 use crate::time_in_force::TimeInForce;
 use crate::value::{Price, Quantity, TimestampMs};
-use std::hash::Hash;
+use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
-use std::ops::Add;
 
 /// Order represents different types of orders
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Order {
     /// Standard limit order.
     Standard {
@@ -36,6 +36,9 @@ pub enum Order {
 
         /// Time-in-force policy.
         time_in_force: TimeInForce,
+
+        /// Symbol of the project.
+        symbol: Symbol,
 
         /// Signature of the order.
         signature: Signature,
@@ -70,6 +73,9 @@ pub enum Order {
         /// Time-in-force policy.
         time_in_force: TimeInForce,
 
+        /// Symbol of the project.
+        symbol: Symbol,
+
         /// Signature of the order.
         signature: Signature,
     },
@@ -92,6 +98,10 @@ pub enum Order {
         timestamp: TimestampMs,
         /// Time-in-force policy.
         time_in_force: TimeInForce,
+
+        /// Symbol of the project.
+        symbol: Symbol,
+
         /// Signature of the order.
         signature: Signature,
     },
@@ -118,6 +128,10 @@ pub enum Order {
         trail_amount: Quantity,
         /// Last reference price.
         last_ref_price: Price,
+
+        /// Symbol of the project.
+        symbol: Symbol,
+
         /// Signature of the order.
         signature: Signature,
     },
@@ -144,6 +158,10 @@ pub enum Order {
         reference_price_offset: i64,
         /// Type of reference price to track.
         reference_price_type: PegReferenceType,
+
+        /// Symbol of the project.
+        symbol: Symbol,
+
         /// The signature.
         signature: Signature,
     },
@@ -166,6 +184,10 @@ pub enum Order {
         timestamp: TimestampMs,
         /// Time-in-force policy
         time_in_force: TimeInForce,
+
+        /// Symbol of the project.
+        symbol: Symbol,
+
         /// The signature.
         signature: Signature,
     },
@@ -203,6 +225,10 @@ pub enum Order {
         replenish_amount: Option<NonZeroU64>,
         /// Whether to replenish automatically when below threshold. If false, only replenish on next match
         auto_replenish: bool,
+
+        /// Symbol of the project.
+        symbol: Symbol,
+
         /// The signature.
         signature: Signature,
     },
