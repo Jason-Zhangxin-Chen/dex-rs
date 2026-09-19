@@ -19,7 +19,7 @@ pub enum Side {
 }
 
 /// Hash32 represents 32 bytes hash.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Hash)]
 #[serde(transparent)]
 pub struct Hash32(pub [u8; 32]);
 

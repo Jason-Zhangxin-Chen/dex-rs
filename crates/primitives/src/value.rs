@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Value type representing a price.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub struct Price(pub u128);
 
 /// Quantity type representing a quantity in an order.
