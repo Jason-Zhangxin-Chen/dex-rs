@@ -6,5 +6,5 @@ pub mod event;
 pub mod order;
 pub mod signature;
 pub mod time_in_force;
-mod trade;
+pub mod trade;
 pub mod value;
