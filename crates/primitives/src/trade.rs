@@ -149,7 +149,7 @@ mod tests {
         Trade {
             trade_id: hash32(seed),
             maker_order_id: hash32(seed.wrapping_add(100)),
-            maker_address: if seed % 2 == 0 { eth_address() } else { sol_address() },
+            maker_address: if seed.is_multiple_of(2) { eth_address() } else { sol_address() },
             price: Price(1_000 * seed as u128),
             quantity: Quantity(10 * seed as u64),
             timestamp: TimestampMs(1_700_000_000_000 + seed as u64),
@@ -284,8 +284,8 @@ mod tests {
     fn make_match_result(seed: u8) -> MatchResult {
         MatchResult {
             taker_order_id: hash32(seed),
-            taker_address: if seed % 2 == 0 { eth_address() } else { sol_address() },
-            taker_side: if seed % 2 == 0 { Side::Buy } else { Side::Sell },
+            taker_address: if seed.is_multiple_of(2) { eth_address() } else { sol_address() },
+            taker_side: if seed.is_multiple_of(2) { Side::Buy } else { Side::Sell },
             trades: vec![make_trade(seed), make_trade(seed.wrapping_add(1))],
             remaining_quantity: Quantity(0),
             filled_order_ids: vec![hash32(seed.wrapping_add(200))],

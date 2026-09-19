@@ -304,13 +304,13 @@ mod tests {
             id: hash32(seed),
             price: Price(1_000 * seed as u128),
             quantity: Quantity(10 * seed as u64),
-            side: if seed % 2 == 0 { Side::Buy } else { Side::Sell },
-            user: if seed % 2 == 0 { eth_address() } else { sol_address() },
+            side: if seed.is_multiple_of(2) { Side::Buy } else { Side::Sell },
+            user: if seed.is_multiple_of(2) { eth_address() } else { sol_address() },
             nonce: Nonce(seed as u64),
             timestamp: TimestampMs(1_700_000_000_000 + seed as u64),
             time_in_force: TimeInForce::Gtc,
             symbol: symbol(seed),
-            signature: if seed % 2 == 0 { eth_signature() } else { sol_signature() },
+            signature: if seed.is_multiple_of(2) { eth_signature() } else { sol_signature() },
         }
     }
 
