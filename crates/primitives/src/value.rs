@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Value type representing a price.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
-pub struct Price(pub u128);
+pub struct Price(pub u64);
 
 impl Price {
     /// Zero price value.
@@ -41,7 +41,7 @@ mod tests {
 
     #[test]
     fn test_ser_deser_price() {
-        let price = Price(1_000_000_000_000_000_000_000u128);
+        let price = Price(1_000_000_000_000_000_000_000u64);
         let bytes = to_vec(&price).unwrap();
         let restored: Price = from_slice(&bytes).unwrap();
         assert_eq!(price, restored);
@@ -49,7 +49,7 @@ mod tests {
 
     #[test]
     fn test_price_boundary_values() {
-        for value in [0u128, 1, u64::MAX as u128, u128::MAX, u128::MAX - 1] {
+        for value in [0u64, 1, u64::MAX, u64::MAX - 1] {
             let price = Price(value);
             let bytes = to_vec(&price).unwrap();
             let restored: Price = from_slice(&bytes).unwrap();
@@ -64,7 +64,7 @@ mod tests {
         let bytes = to_vec(&price).unwrap();
         let restored: Price = from_slice(&bytes).unwrap();
         assert_eq!(price, restored);
-        assert_eq!(restored.0, 0u128);
+        assert_eq!(restored.0, 0u64);
     }
 
     #[test]
@@ -218,7 +218,7 @@ mod tests {
         // u128 values above u64::MAX should encode differently from any
         // u64-based wrapper. This guards against accidentally swapping
         // the inner types.
-        let big = u64::MAX as u128 + 1;
+        let big = u64::MAX;
         let price_bytes = to_vec(&Price(big)).unwrap();
         let qty_bytes = to_vec(&Quantity(u64::MAX)).unwrap();
         assert_ne!(price_bytes, qty_bytes);
@@ -235,7 +235,7 @@ mod tests {
             let ts = TimestampMs(v);
             assert_eq!(ts, from_slice::<TimestampMs>(&to_vec(&ts).unwrap()).unwrap());
 
-            let price = Price(v as u128);
+            let price = Price(v);
             assert_eq!(price, from_slice::<Price>(&to_vec(&price).unwrap()).unwrap());
         }
     }
