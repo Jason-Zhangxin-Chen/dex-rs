@@ -1,7 +1,7 @@
 //! Order status
 
-use serde::{Deserialize, Serialize};
 use crate::value::Quantity;
+use serde::{Deserialize, Serialize};
 
 /// Order status for lifecycle tracking.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -31,7 +31,7 @@ pub enum OrderStatus {
     Rejected {
         /// Reason.
         reason: RejectReason,
-    }
+    },
 }
 
 /// Reason for order cancellation.

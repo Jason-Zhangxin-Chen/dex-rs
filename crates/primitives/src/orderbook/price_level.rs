@@ -1,10 +1,10 @@
 //! The definition of a price level.
 
-use serde::{Deserialize, Serialize};
 use crate::base::Side;
 use crate::order::Order;
 use crate::orderbook::statistics::PriceLevelStatistics;
 use crate::value::{Price, Quantity};
+use serde::{Deserialize, Serialize};
 
 /// A price level in a limit order book, lock-free on the match path.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

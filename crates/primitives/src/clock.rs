@@ -1,7 +1,7 @@
 //! A source of wall-clock or logical millisecond timestamp.
 
-use std::fmt;
 use crate::value::TimestampMs;
+use std::fmt;
 
 pub trait Clock: fmt::Debug {
     /// Current millisecond timestamp.
@@ -13,4 +13,3 @@ pub trait Clock: fmt::Debug {
     ///   not wall-clock.
     fn now_millis(&self) -> TimestampMs;
 }
-

@@ -1,10 +1,10 @@
 //! Pre-trade risk layer for orderbook.
 
-use rustc_hash::FxHashMap;
-use serde::{Deserialize, Serialize};
 use crate::address::Address;
 use crate::base::Hash32;
 use crate::value::{Price, Quantity};
+use rustc_hash::FxHashMap;
+use serde::{Deserialize, Serialize};
 
 /// Risk state bound to a single [`OrderBook`](crate::OrderBook).
 ///

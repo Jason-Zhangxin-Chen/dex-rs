@@ -468,11 +468,7 @@ mod tests {
             let mut mr = make_match_result(1);
             mr.out_come = outcome;
 
-            let tr = TradeResult {
-                symbol: symbol(1),
-                match_result: mr,
-                quote_notional: Quote(0),
-            };
+            let tr = TradeResult { symbol: symbol(1), match_result: mr, quote_notional: Quote(0) };
 
             let restored: TradeResult = from_slice(&to_vec(&tr).unwrap()).unwrap();
             assert_eq!(restored.match_result.out_come, outcome);
