@@ -5,13 +5,15 @@ use crate::base::{Hash32, Quote, Side, Symbol};
 use crate::value::{Price, Quantity, TimestampMs};
 use serde::{Deserialize, Serialize};
 
+// todo: impl builders for below types.
+
 /// Enhanced trade result that includes symbol information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradeResult {
     /// The symbol this trade result belongs to
-    pub symbol: Symbol,
+    symbol: Symbol,
     /// The underlying match result.
-    pub match_result: MatchResult,
+    match_result: MatchResult,
     /// Total quote-asset notional consumed by this trade, computed as
     /// `Σ price × quantity` across every transaction. Populated for both
     /// base-quantity (`match_market_order`) and quote-notional
@@ -20,7 +22,7 @@ pub struct TradeResult {
     ///
     /// Defaults to `0` when deserializing payloads from format versions
     /// that pre-date `quote_notional` so existing consumers keep parsing.
-    pub quote_notional: Quote,
+    quote_notional: Quote,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

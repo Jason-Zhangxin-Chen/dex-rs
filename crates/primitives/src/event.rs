@@ -7,6 +7,8 @@ use crate::signature::Signature;
 use crate::value::{Price, Quantity, TimestampMs};
 use serde::{Deserialize, Serialize};
 
+// todo: impl builder for below types.
+
 /// New Order event
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct NewOrder {
@@ -37,13 +39,13 @@ pub struct CancelOrder {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct PriceLevelChangedEvent {
     /// the order book side of the price level
-    pub side: Side,
+    side: Side,
 
     /// price level price
-    pub price: Price,
+    price: Price,
 
     /// latest visible quantity of the order book at this price level
-    pub quantity: Quantity,
+    quantity: Quantity,
 }
 
 #[cfg(test)]

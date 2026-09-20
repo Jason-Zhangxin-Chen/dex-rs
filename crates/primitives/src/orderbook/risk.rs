@@ -24,17 +24,17 @@ pub struct RiskState {
 pub struct RiskConfig {
     /// Maximum number of resting orders a single account may have on
     /// this book at any time. `None` disables the check.
-    pub max_open_orders_per_account: Option<u64>,
+    max_open_orders_per_account: Option<u64>,
     /// Maximum notional (`price × quantity`, in raw ticks) a single
     /// account may have resting on this book at any time. `None`
     /// disables the check.
-    pub max_notional_per_account: Option<u128>,
+    max_notional_per_account: Option<u128>,
     /// Maximum allowed deviation in basis points between an incoming
     /// limit price and the resolved reference price. `None` (or
     /// `reference_price = None`) disables the check.
-    pub price_band_bps: Option<u32>,
+    price_band_bps: Option<u32>,
     /// Reference price source used by the price-band check.
-    pub reference_price: Option<ReferencePriceSource>,
+    reference_price: Option<ReferencePriceSource>,
 }
 
 /// Per-account counters maintained by [`RiskState`].
@@ -47,10 +47,10 @@ pub struct RiskConfig {
 #[derive(Debug, Default)]
 pub struct RiskCounters {
     /// Number of resting orders this account currently has on the book.
-    pub(super) open_count: u64,
+    open_count: u64,
     /// Sum of `price × remaining_qty` (in raw ticks) across all of
     /// this account's resting orders.
-    pub(super) resting_notional: u128,
+    resting_notional: u128,
 }
 
 /// Per-resting-order risk bookkeeping.
@@ -59,9 +59,9 @@ pub struct RiskCounters {
 /// and fill to compute the deltas applied to per-account counters.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct RiskEntry {
-    pub(super) account: Address,
-    pub(super) price: Price,
-    pub(super) remaining_qty: Quantity,
+    account: Address,
+    price: Price,
+    remaining_qty: Quantity,
 }
 
 /// Source for the reference price used by the price-band check.
