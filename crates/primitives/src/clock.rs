@@ -13,3 +13,5 @@ pub trait Clock: fmt::Debug {
     ///   not wall-clock.
     fn now_millis(&self) -> TimestampMs;
 }
+
+// todo: impl an non blocking ClockMS type which get the timestamp since epoch.
