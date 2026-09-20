@@ -6,13 +6,28 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub struct Price(pub u128);
 
+impl Price {
+    /// Zero price value.
+    pub const ZERO: Self = Self(0);
+}
+
 /// Quantity type representing a quantity in an order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Quantity(pub u64);
 
+impl Quantity {
+    /// Zero quantity value.
+    pub const ZERO: Self = Self(0);
+}
+
 /// TimestampMS representing a TS in millisecond.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct TimestampMs(pub u64);
+
+impl TimestampMs {
+    /// Zero timestamp value.
+    pub const ZERO: Self = Self(0);
+}
 
 #[cfg(test)]
 mod tests {
