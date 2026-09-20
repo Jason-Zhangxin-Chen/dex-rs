@@ -8,34 +8,45 @@ use crate::value::{Price, Quantity, TimestampMs};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 
+
+/// OrderCore contains the core data for match engine, it is planed on purpose for cache line
+/// friendly loading, the tuple (Address, Nonce) is used to index an order in the book.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrderCore {
+    
+    /// (Address, Nonce) works as the key to an order in the book.
+    /// The user address.       
+    pub user: Address,              // 32 Bytes,
+    /// The order nonce.
+    pub nonce: Nonce,               // 8 Bytes,
+    
+    /// The price of the order.
+    pub price: Price,               // 8 Bytes,
+    
+    /// The visible quantity/quantity of the order.
+    pub quantity: Quantity,         // 8 Byte,
+    
+    /// Time in force policy.
+    pub time_in_force: TimeInForce, // 2 Bytes,
+    
+    /// The side of the order.
+    pub side: Side,                 // 1 Bytes,
+}
+
 /// Order represents different types of orders
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Order {
     /// Standard limit order.
     Standard {
+        /// Core data for match engine.
+        core: OrderCore,
+        
         /// The hash of the order.
         id: Hash32,
 
-        /// The price of the order.
-        price: Price,
-
-        /// The quantity of the order.
-        quantity: Quantity,
-
-        /// The side of the order.
-        side: Side,
-
-        /// The user address.
-        user: Address,
-
-        /// The nonce.
-        nonce: Nonce,
-
         /// When the order is created.
         timestamp: TimestampMs,
-
-        /// Time-in-force policy.
-        time_in_force: TimeInForce,
 
         /// Symbol of the project.
         symbol: Symbol,
@@ -46,32 +57,17 @@ pub enum Order {
 
     /// Iceberg order with visible and hidden quantities.
     Iceberg {
+        /// Core data for match engine.
+        core: OrderCore,
+        
         /// The hash of the order.
         id: Hash32,
-
-        /// The price of the order.
-        price: Price,
-
-        /// The visible quantity.
-        visible_quantity: Quantity,
 
         /// The hidden quantity.
         hidden_quantity: Quantity,
 
-        /// The side of the order.
-        side: Side,
-
-        /// The use address.
-        user: Address,
-
-        /// The nonce.
-        nonce: Nonce,
-
         /// When the order is created.
         timestamp: TimestampMs,
-
-        /// Time-in-force policy.
-        time_in_force: TimeInForce,
 
         /// Symbol of the project.
         symbol: Symbol,
@@ -82,22 +78,14 @@ pub enum Order {
 
     /// Post only order that won't match immediately.
     PostOnly {
+        /// Core data for match engine.
+        core: OrderCore,
+
         /// The hash of the order.
         id: Hash32,
-        /// The price of the order.
-        price: Price,
-        /// The quantity of the order.
-        quantity: Quantity,
-        /// The side of the order.
-        side: Side,
-        /// The user address.
-        user: Address,
-        /// The nonce.
-        nonce: Nonce,
+
         /// When the order is created.
         timestamp: TimestampMs,
-        /// Time-in-force policy.
-        time_in_force: TimeInForce,
 
         /// Symbol of the project.
         symbol: Symbol,
@@ -108,24 +96,17 @@ pub enum Order {
 
     /// Trailing stop order that adjusts with market movement
     TrailingStop {
+        /// Core data for match engine.
+        core: OrderCore,
+        
         /// The hash of the order.
         id: Hash32,
-        /// The price of the order.
-        price: Price,
-        /// The quantity of the order.
-        quantity: Quantity,
-        /// The side of the order.
-        side: Side,
-        /// The user address.
-        user: Address,
-        /// The nonce.
-        nonce: Nonce,
         /// When the order is created.
         timestamp: TimestampMs,
-        /// Time-in-force policy.
-        time_in_force: TimeInForce,
+        
         /// Amount to trail the market price.
         trail_amount: Quantity,
+        
         /// Last reference price.
         last_ref_price: Price,
 
@@ -138,24 +119,18 @@ pub enum Order {
 
     /// Pegged order that adjusts based on reference price
     Pegged {
+        /// Core data for match engine.
+        core: OrderCore,
+        
         /// The hash of the order.
         id: Hash32,
-        /// The price of the order.
-        price: Price,
-        /// The quantity of the order.
-        quantity: Quantity,
-        /// The side of the order.
-        side: Side,
-        /// The user address.
-        user: Address,
-        /// The Nonce.
-        nonce: Nonce,
+        
         /// When the order was created.
         timestamp: TimestampMs,
-        /// Time-in-force policy.
-        time_in_force: TimeInForce,
+        
         /// Offset from the reference price.
         reference_price_offset: i64,
+ 
         /// Type of reference price to track.
         reference_price_type: PegReferenceType,
 
@@ -168,22 +143,14 @@ pub enum Order {
 
     /// Market-to-limit order that converts to limit after initial execution
     MarketToLimit {
+        /// Core data for match engine.
+        core: OrderCore,
+
         /// The hash of the order.
         id: Hash32,
-        /// The price of the order.
-        price: Price,
-        /// The quantity of the order.
-        quantity: Quantity,
-        /// The side of the order.
-        side: Side,
-        /// The user address.
-        user: Address,
-        /// The nonce.
-        nonce: Nonce,
+
         /// When the order was created.
         timestamp: TimestampMs,
-        /// Time-in-force policy
-        time_in_force: TimeInForce,
 
         /// Symbol of the project.
         symbol: Symbol,
@@ -198,31 +165,27 @@ pub enum Order {
     /// if `auto_replenish` is false and visible quantity is zero it will be removed from the book
     /// if `auto_replenish` is true, and replenish_threshold is 0, it will use 1
     ReserveOrder {
+        /// Core data for match engine.
+        core: OrderCore,
+        
         /// The hash of the order.
         id: Hash32,
-        /// The price of the order.
-        price: Price,
-        /// The visible quantity of the order.
-        visible_quantity: Quantity,
+        
         /// The hidden quantity of the order.
         hidden_quantity: Quantity,
-        /// The side of the order.
-        side: Side,
-        /// The user address.
-        user: Address,
-        /// The nonce.
-        nonce: Nonce,
+        
         /// When the order was created
         timestamp: TimestampMs,
-        /// Time-in-force policy
-        time_in_force: TimeInForce,
+        
         /// Threshold at which to replenish
         replenish_threshold: Quantity,
+        
         /// Optional amount to replenish by, in quantity units. If `None`, uses
         /// [`DEFAULT_RESERVE_REPLENISH_AMOUNT`]. A replenish amount is
         /// structurally non-zero ([`NonZeroU64`]): a zero replenish would draw
         /// an empty visible tranche from hidden.
         replenish_amount: Option<NonZeroU64>,
+        
         /// Whether to replenish automatically when below threshold. If false, only replenish on next match
         auto_replenish: bool,
 

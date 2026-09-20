@@ -1,7 +1,7 @@
 //! Orderbook definitions.
 
 use crate::address::Address;
-use crate::base::{Hash32, Symbol};
+use crate::base::{Hash32, Nonce, Symbol};
 use crate::clock::Clock;
 use crate::event::PriceLevelChangedEvent;
 use crate::order::Order;
@@ -15,6 +15,7 @@ use crate::value::{Price, Quantity};
 use rustc_hash::FxHashMap;
 use slab::Slab;
 use std::collections::BTreeMap;
+use std::ops::Add;
 
 /// Trade listener push trade event to the settlement services, to the storage infra and to the
 /// external messaging service.
@@ -43,8 +44,8 @@ pub struct OrderBook {
     /// The asks price levels.
     asks: BTreeMap<Price, PriceLevel>,
 
-    /// Index for an order.
-    index: FxHashMap<Hash32, OrderIdx>,
+    /// Index for an order, use below tuple to replace hash32 for cache line friendly loading.
+    index: FxHashMap<(Address, Nonce), OrderIdx>,
 
     /// User orders.
     user_orders: FxHashMap<Address, Vec<OrderIdx>>,

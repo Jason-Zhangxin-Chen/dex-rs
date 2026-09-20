@@ -12,8 +12,8 @@ pub enum TimeInForce {
     Ioc,
     /// Fill or Kill.
     Fok,
-    /// Good till date.
-    Gtd(u64),
+    /// Good till date, the u8 carries the lifetime of the order in hours.
+    Gtd(u8),
     /// Good for the trading day.
     Day,
 }
