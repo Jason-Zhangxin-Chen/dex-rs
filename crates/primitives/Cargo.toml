@@ -5,6 +5,8 @@ edition = "2024"
 license = "Apache-2.0"
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
+rustc-hash = {workspace = true}
+slab = {workspace = true}
 
 [dev-dependencies]
 alloy = {workspace = true}

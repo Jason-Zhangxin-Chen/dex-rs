@@ -1,25 +1,17 @@
 //! Trade represents the exchange between maker and taker orders.
 
 use crate::address::Address;
-use crate::base::{Fee, Hash32, Quote, Side, Symbol};
+use crate::base::{Hash32, Quote, Side, Symbol};
 use crate::value::{Price, Quantity, TimestampMs};
 use serde::{Deserialize, Serialize};
 
-/// Enhanced trade result that includes symbol information and fee details
+/// Enhanced trade result that includes symbol information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradeResult {
     /// The symbol this trade result belongs to
     pub symbol: Symbol,
     /// The underlying match result.
     pub match_result: MatchResult,
-    /// Total maker fees across all transactions in this trade, in the same
-    /// unit as the notional (price × quantity). Negative values represent
-    /// rebates. Zero when no `FeeSchedule` is configured.
-    pub total_maker_fees: Fee,
-    /// Total taker fees across all transactions in this trade, in the same
-    /// unit as the notional (price × quantity). Zero when no `FeeSchedule`
-    /// is configured.
-    pub total_taker_fees: Fee,
     /// Total quote-asset notional consumed by this trade, computed as
     /// `Σ price × quantity` across every transaction. Populated for both
     /// base-quantity (`match_market_order`) and quote-notional
@@ -56,7 +48,7 @@ pub struct MatchResult {
 ///
 /// All fields are private to enforce immutability after construction.
 /// Use the provided accessor methods to read trade data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Trade {
     /// Unique trade ID
     trade_id: Hash32,
@@ -78,7 +70,7 @@ pub struct Trade {
 }
 
 #[repr(u8)]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum MatchOutcome {
     /// The incoming order was completely filled (`remaining_quantity == 0`).
     Filled,
@@ -114,7 +106,7 @@ mod tests {
     use solana_sdk::signer::{Signer, keypair::Keypair};
 
     use crate::address::{Address, EthAddress, SolAddress};
-    use crate::base::{Fee, Hash32, Quote, Side, Symbol};
+    use crate::base::{Hash32, Quote, Side, Symbol};
     use crate::value::{Price, Quantity, TimestampMs};
 
     use super::{MatchOutcome, MatchResult, Trade, TradeResult};
@@ -331,7 +323,7 @@ mod tests {
                 trades: vec![],
                 remaining_quantity: Quantity(100),
                 filled_order_ids: vec![],
-                out_come: outcome.clone(),
+                out_come: outcome,
             };
 
             let restored: MatchResult = from_slice(&to_vec(&result).unwrap()).unwrap();
@@ -380,7 +372,7 @@ mod tests {
             let result = MatchResult {
                 taker_order_id: hash32(1),
                 taker_address: eth_address(),
-                taker_side: side.clone(),
+                taker_side: side,
                 trades: vec![],
                 remaining_quantity: Quantity(0),
                 filled_order_ids: vec![],
@@ -416,8 +408,6 @@ mod tests {
         TradeResult {
             symbol: symbol(seed),
             match_result: make_match_result(seed),
-            total_maker_fees: Fee(-100),
-            total_taker_fees: Fee(200),
             quote_notional: Quote(1_000_000 * seed as u128),
         }
     }
@@ -436,8 +426,6 @@ mod tests {
         let restored: TradeResult = from_slice(&to_vec(&tr).unwrap()).unwrap();
 
         assert_eq!(restored.symbol, tr.symbol);
-        assert_eq!(restored.total_maker_fees.0, tr.total_maker_fees.0);
-        assert_eq!(restored.total_taker_fees.0, tr.total_taker_fees.0);
         assert_eq!(restored.quote_notional.0, tr.quote_notional.0);
     }
 
@@ -456,32 +444,11 @@ mod tests {
     }
 
     #[test]
-    fn test_trade_result_fee_signs_preserved() {
-        // Fee is i128; negative rebates must survive.
-        let cases = [(Fee(0), Fee(0)), (Fee(-1), Fee(1)), (Fee(i128::MIN), Fee(i128::MAX))];
-        for (maker, taker) in cases {
-            let tr = TradeResult {
-                symbol: symbol(1),
-                match_result: make_match_result(1),
-                total_maker_fees: maker.clone(),
-                total_taker_fees: taker.clone(),
-                quote_notional: Quote(0),
-            };
-
-            let restored: TradeResult = from_slice(&to_vec(&tr).unwrap()).unwrap();
-            assert_eq!(restored.total_maker_fees.0, maker.0);
-            assert_eq!(restored.total_taker_fees.0, taker.0);
-        }
-    }
-
-    #[test]
     fn test_trade_result_quote_notional_boundaries() {
         for value in [0u128, 1, u64::MAX as u128, u128::MAX, u128::MAX - 1] {
             let tr = TradeResult {
                 symbol: symbol(1),
                 match_result: make_match_result(1),
-                total_maker_fees: Fee(0),
-                total_taker_fees: Fee(0),
                 quote_notional: Quote(value),
             };
             let restored: TradeResult = from_slice(&to_vec(&tr).unwrap()).unwrap();
@@ -499,15 +466,9 @@ mod tests {
             MatchOutcome::Rejected,
         ] {
             let mut mr = make_match_result(1);
-            mr.out_come = outcome.clone();
+            mr.out_come = outcome;
 
-            let tr = TradeResult {
-                symbol: symbol(1),
-                match_result: mr,
-                total_maker_fees: Fee(0),
-                total_taker_fees: Fee(0),
-                quote_notional: Quote(0),
-            };
+            let tr = TradeResult { symbol: symbol(1), match_result: mr, quote_notional: Quote(0) };
 
             let restored: TradeResult = from_slice(&to_vec(&tr).unwrap()).unwrap();
             assert_eq!(restored.match_result.out_come, outcome);

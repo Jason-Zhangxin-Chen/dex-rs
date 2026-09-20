@@ -3105,7 +3105,9 @@ version = "0.1.0"
 dependencies = [
  "alloy",
  "rmp-serde",
+ "rustc-hash",
  "serde",
+ "slab",
  "solana-sdk",
 ]
 

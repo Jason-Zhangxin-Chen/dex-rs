@@ -3,13 +3,13 @@
 use serde::{Deserialize, Serialize};
 
 /// Symbol represents the symbol of a product.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Symbol(pub [u8; 32]);
 
 /// Side represents the side of an order.
 #[repr(u8)]
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Side {
     /// Buy side (bids)
     Buy,
@@ -19,18 +19,18 @@ pub enum Side {
 }
 
 /// Hash32 represents 32 bytes hash.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Hash)]
 #[serde(transparent)]
 pub struct Hash32(pub [u8; 32]);
 
 /// Nonce represents a sequence number of user's order.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Nonce(pub u64);
 
 /// Reference price type for pegged orders.
 #[repr(u8)]
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PegReferenceType {
     /// Pegged to best bid price.
     BestBid,
@@ -43,14 +43,9 @@ pub enum PegReferenceType {
 }
 
 /// Total quote-asset computed as `Σ price × quantity` across every transaction.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Quote(pub u128);
-
-/// Fee for the takers or makers
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Fee(pub i128);
 
 #[cfg(test)]
 mod tests {
@@ -260,40 +255,6 @@ mod tests {
     fn test_quote_encoding_is_deterministic() {
         let quote = Quote(999_999_999);
         assert_eq!(to_vec(&quote).unwrap(), to_vec(&quote).unwrap());
-    }
-
-    // ---------------------------------------------------------------
-    // Fee (i128, no Eq derive on the wrapper)
-    // ---------------------------------------------------------------
-
-    #[test]
-    fn test_ser_deser_fee() {
-        let fee = Fee(-1_000_000);
-        let bytes = to_vec(&fee).unwrap();
-        let restored: Fee = from_slice(&bytes).unwrap();
-        assert_eq!(fee.0, restored.0);
-    }
-
-    #[test]
-    fn test_fee_boundary_values() {
-        for value in [0i128, 1, -1, i64::MAX as i128, i64::MIN as i128, i128::MAX, i128::MIN] {
-            let fee = Fee(value);
-            let bytes = to_vec(&fee).unwrap();
-            let restored: Fee = from_slice(&bytes).unwrap();
-            assert_eq!(fee.0, restored.0);
-        }
-    }
-
-    #[test]
-    fn test_fee_wire_format_is_raw_payload() {
-        let fee = Fee(-42);
-        assert_eq!(to_vec(&fee).unwrap(), to_vec(&-42i128).unwrap());
-    }
-
-    #[test]
-    fn test_fee_encoding_is_deterministic() {
-        let fee = Fee(-777);
-        assert_eq!(to_vec(&fee).unwrap(), to_vec(&fee).unwrap());
     }
 
     // ---------------------------------------------------------------

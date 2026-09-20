@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 
 /// Order represents different types of orders
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Order {
     /// Standard limit order.
     Standard {
@@ -794,7 +794,7 @@ mod tests {
                 user: eth_address(),
                 nonce: Nonce(1),
                 timestamp: TimestampMs(1),
-                time_in_force: tif.clone(),
+                time_in_force: tif,
                 symbol: symbol(1),
                 signature: eth_signature(),
             };
