@@ -149,7 +149,7 @@ mod tests {
             trade_id: hash32(seed),
             maker_order_id: hash32(seed.wrapping_add(100)),
             maker_address: if seed.is_multiple_of(2) { eth_address() } else { sol_address() },
-            price: Price(1_000 * seed as u128),
+            price: Price(1_000 * seed as u64),
             quantity: Quantity(10 * seed as u64),
             timestamp: TimestampMs(1_700_000_000_000 + seed as u64),
         }

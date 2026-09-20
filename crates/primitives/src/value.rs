@@ -41,7 +41,7 @@ mod tests {
 
     #[test]
     fn test_ser_deser_price() {
-        let price = Price(1_000_000_000_000_000_000_000u64);
+        let price = Price(1_000_000_000_000u64);
         let bytes = to_vec(&price).unwrap();
         let restored: Price = from_slice(&bytes).unwrap();
         assert_eq!(price, restored);
@@ -71,7 +71,7 @@ mod tests {
     fn test_price_wire_format_is_raw_payload() {
         // Newtype structs serialize transparently by default under rmp-serde.
         let price = Price(12345);
-        assert_eq!(to_vec(&price).unwrap(), to_vec(&12345u128).unwrap());
+        assert_eq!(to_vec(&price).unwrap(), to_vec(&12345u64).unwrap());
     }
 
     #[test]
@@ -211,17 +211,6 @@ mod tests {
         // type, not by wire format.
         let raw = 42u64;
         assert_eq!(to_vec(&Quantity(raw)).unwrap(), to_vec(&TimestampMs(raw)).unwrap(),);
-    }
-
-    #[test]
-    fn test_price_wire_format_differs_from_u64_wrappers_for_large_values() {
-        // u128 values above u64::MAX should encode differently from any
-        // u64-based wrapper. This guards against accidentally swapping
-        // the inner types.
-        let big = u64::MAX;
-        let price_bytes = to_vec(&Price(big)).unwrap();
-        let qty_bytes = to_vec(&Quantity(u64::MAX)).unwrap();
-        assert_ne!(price_bytes, qty_bytes);
     }
 
     #[test]

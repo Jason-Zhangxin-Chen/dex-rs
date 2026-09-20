@@ -302,7 +302,7 @@ mod tests {
     fn common(seed: u8) -> Common {
         Common {
             id: hash32(seed),
-            price: Price(1_000 * seed as u128),
+            price: Price(1_000 * seed as u64),
             quantity: Quantity(10 * seed as u64),
             side: if seed.is_multiple_of(2) { Side::Buy } else { Side::Sell },
             user: if seed.is_multiple_of(2) { eth_address() } else { sol_address() },
