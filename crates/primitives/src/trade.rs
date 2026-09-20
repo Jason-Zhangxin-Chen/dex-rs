@@ -5,15 +5,15 @@ use crate::base::{Hash32, Quote, Side, Symbol};
 use crate::value::{Price, Quantity, TimestampMs};
 use serde::{Deserialize, Serialize};
 
-// todo: impl builders for below types.
-
 /// Enhanced trade result that includes symbol information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradeResult {
     /// The symbol this trade result belongs to
-    symbol: Symbol,
+    pub symbol: Symbol,
+
     /// The underlying match result.
-    match_result: MatchResult,
+    pub match_result: MatchResult,
+
     /// Total quote-asset notional consumed by this trade, computed as
     /// `Σ price × quantity` across every transaction. Populated for both
     /// base-quantity (`match_market_order`) and quote-notional
@@ -22,28 +22,33 @@ pub struct TradeResult {
     ///
     /// Defaults to `0` when deserializing payloads from format versions
     /// that pre-date `quote_notional` so existing consumers keep parsing.
-    quote_notional: Quote,
+    pub quote_notional: Quote,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatchResult {
     /// The taker order ID.
-    taker_order_id: Hash32,
+    pub taker_order_id: Hash32,
 
     /// The taker address.
-    taker_address: Address,
+    pub taker_address: Address,
 
     /// The taker side.
-    taker_side: Side,
+    pub taker_side: Side,
 
-    /// List of trades that resulted from teh match
-    trades: Vec<Trade>,
+    // todo: Avoid the runtime heap allocation on match result constructions.
+    /// List of trades that resulted from the match.
+    pub trades: Vec<Trade>,
+
     /// Remaining quantity of the taker order after matching.
-    remaining_quantity: Quantity,
+    pub remaining_quantity: Quantity,
+
+    // todo: Avoid the runtime heap allocation on match result constructions.
     /// Any maker orders that were completely filled and removed from the book.
-    filled_order_ids: Vec<Hash32>,
+    pub filled_order_ids: Vec<Hash32>,
+
     /// Match outcome.
-    out_come: MatchOutcome,
+    pub out_come: MatchOutcome,
 }
 
 /// Represents a completed trade between two orders.
@@ -53,22 +58,22 @@ pub struct MatchResult {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Trade {
     /// Unique trade ID
-    trade_id: Hash32,
+    pub trade_id: Hash32,
 
     /// ID of the passive order that was in the book
-    maker_order_id: Hash32,
+    pub maker_order_id: Hash32,
 
     /// The maker address.
-    maker_address: Address,
+    pub maker_address: Address,
 
     /// Price at which the trade occurred
-    price: Price,
+    pub price: Price,
 
     /// Quantity traded
-    quantity: Quantity,
+    pub quantity: Quantity,
 
     /// Timestamp when the trade occurred in milliseconds since epoch
-    timestamp: TimestampMs,
+    pub timestamp: TimestampMs,
 }
 
 #[repr(u8)]
@@ -144,7 +149,7 @@ mod tests {
             trade_id: hash32(seed),
             maker_order_id: hash32(seed.wrapping_add(100)),
             maker_address: if seed.is_multiple_of(2) { eth_address() } else { sol_address() },
-            price: Price(1_000 * seed as u128),
+            price: Price(1_000 * seed as u64),
             quantity: Quantity(10 * seed as u64),
             timestamp: TimestampMs(1_700_000_000_000 + seed as u64),
         }

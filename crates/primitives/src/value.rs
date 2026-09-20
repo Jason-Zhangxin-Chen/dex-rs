@@ -4,15 +4,30 @@ use serde::{Deserialize, Serialize};
 
 /// Value type representing a price.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
-pub struct Price(pub u128);
+pub struct Price(pub u64);
+
+impl Price {
+    /// Zero price value.
+    pub const ZERO: Self = Self(0);
+}
 
 /// Quantity type representing a quantity in an order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Quantity(pub u64);
 
+impl Quantity {
+    /// Zero quantity value.
+    pub const ZERO: Self = Self(0);
+}
+
 /// TimestampMS representing a TS in millisecond.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct TimestampMs(pub u64);
+
+impl TimestampMs {
+    /// Zero timestamp value.
+    pub const ZERO: Self = Self(0);
+}
 
 #[cfg(test)]
 mod tests {
@@ -26,7 +41,7 @@ mod tests {
 
     #[test]
     fn test_ser_deser_price() {
-        let price = Price(1_000_000_000_000_000_000_000u128);
+        let price = Price(1_000_000_000_000u64);
         let bytes = to_vec(&price).unwrap();
         let restored: Price = from_slice(&bytes).unwrap();
         assert_eq!(price, restored);
@@ -34,7 +49,7 @@ mod tests {
 
     #[test]
     fn test_price_boundary_values() {
-        for value in [0u128, 1, u64::MAX as u128, u128::MAX, u128::MAX - 1] {
+        for value in [0u64, 1, u64::MAX, u64::MAX - 1] {
             let price = Price(value);
             let bytes = to_vec(&price).unwrap();
             let restored: Price = from_slice(&bytes).unwrap();
@@ -49,14 +64,14 @@ mod tests {
         let bytes = to_vec(&price).unwrap();
         let restored: Price = from_slice(&bytes).unwrap();
         assert_eq!(price, restored);
-        assert_eq!(restored.0, 0u128);
+        assert_eq!(restored.0, 0u64);
     }
 
     #[test]
     fn test_price_wire_format_is_raw_payload() {
         // Newtype structs serialize transparently by default under rmp-serde.
         let price = Price(12345);
-        assert_eq!(to_vec(&price).unwrap(), to_vec(&12345u128).unwrap());
+        assert_eq!(to_vec(&price).unwrap(), to_vec(&12345u64).unwrap());
     }
 
     #[test]
@@ -199,17 +214,6 @@ mod tests {
     }
 
     #[test]
-    fn test_price_wire_format_differs_from_u64_wrappers_for_large_values() {
-        // u128 values above u64::MAX should encode differently from any
-        // u64-based wrapper. This guards against accidentally swapping
-        // the inner types.
-        let big = u64::MAX as u128 + 1;
-        let price_bytes = to_vec(&Price(big)).unwrap();
-        let qty_bytes = to_vec(&Quantity(u64::MAX)).unwrap();
-        assert_ne!(price_bytes, qty_bytes);
-    }
-
-    #[test]
     fn test_roundtrip_many_values() {
         for i in 0..1000u64 {
             let v = i.wrapping_mul(0x9E37_79B9_7F4A_7C15);
@@ -220,7 +224,7 @@ mod tests {
             let ts = TimestampMs(v);
             assert_eq!(ts, from_slice::<TimestampMs>(&to_vec(&ts).unwrap()).unwrap());
 
-            let price = Price(v as u128);
+            let price = Price(v);
             assert_eq!(price, from_slice::<Price>(&to_vec(&price).unwrap()).unwrap());
         }
     }
