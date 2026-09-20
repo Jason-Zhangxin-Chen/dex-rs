@@ -7,7 +7,7 @@ use crate::orderbook::statistics::PriceLevelStatistics;
 use crate::value::{Price, Quantity};
 
 /// A price level in a limit order book, lock-free on the match path.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct PriceLevel {
     /// The price of the level.
     price: Price,
@@ -29,7 +29,7 @@ pub struct PriceLevel {
 }
 
 /// OrderQueue in time priority, and fast operations.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct OrderQueue {
     /// The oldest order next to be matched.
     head: OrderIdx,
@@ -46,7 +46,7 @@ pub type OrderIdx = usize;
 pub const NIL: OrderIdx = usize::MAX;
 
 /// OrderNode wrap order for queue linking.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct OrderNode {
     /// The order content.
     order: Order,

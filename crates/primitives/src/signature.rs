@@ -5,7 +5,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::convert::TryInto;
 
 /// The signatures from different L1 protocol.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Signature {
     /// Ethereum signature.
     Ethereum(EthSignature),
@@ -14,11 +14,11 @@ pub enum Signature {
 }
 
 /// The implementation of ethereum signature.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EthSignature(pub [u8; 65]);
 
 /// The implementation of solana signature.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SolSignature(pub [u8; 64]);
 
 impl Serialize for EthSignature {

@@ -8,14 +8,14 @@ use crate::value::{Price, Quantity, TimestampMs};
 use serde::{Deserialize, Serialize};
 
 /// New Order event
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct NewOrder {
     /// The order signed by the client.
     order: Order,
 }
 
 /// Cancel Order event
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct CancelOrder {
     /// The symbol.
     symbol: Symbol,
@@ -34,7 +34,7 @@ pub struct CancelOrder {
 /// order book context so we are not adding symbol here.
 /// This event is sent on operations that update the order book price levels
 /// e.g. adding, cancelling, updating or matching order
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct PriceLevelChangedEvent {
     /// the order book side of the price level
     pub side: Side,
@@ -208,7 +208,7 @@ mod tests {
     #[test]
     fn test_new_order_preserves_inner_order_exactly() {
         let order = standard_order();
-        let event = NewOrder { order: order.clone() };
+        let event = NewOrder { order };
         let restored: NewOrder = from_slice(&to_vec(&event).unwrap()).unwrap();
 
         // Compare the inner order directly — Order itself derives PartialEq.
