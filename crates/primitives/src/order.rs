@@ -27,10 +27,7 @@ pub struct Order {
 /// Impl the `From` trait thus that we can convert the OrderNode into Order for trade result.
 impl From<OrderNode> for Order {
     fn from(o: OrderNode) -> Self {
-        Self {
-            hot: o.hot,
-            cold: o.cold,
-        }
+        Self { hot: o.hot, cold: o.cold }
     }
 }
 

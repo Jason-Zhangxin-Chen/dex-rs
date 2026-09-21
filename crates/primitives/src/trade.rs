@@ -1,9 +1,9 @@
 //! Trade represents the exchange between maker and taker orders.
 
 use crate::base::Quote;
+use crate::order::Order;
 use crate::value::{Price, Quantity, TimestampMs};
 use serde::{Deserialize, Serialize};
-use crate::order::Order;
 
 /// Enhanced trade result that includes symbol information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
