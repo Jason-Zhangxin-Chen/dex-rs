@@ -21,7 +21,7 @@ dex-rs is a decentralized exchange composed of two halves:
   | `svd-settle` | Settlement management |
   | `svd-sync` | State synchronization |
 
-All services consume the shared matching-engine types from **`crates/primitives`** — the
+All services consume the shared primitives types from **`crates/primitives`** — the
 heart of the workspace: the order model, the order book, risk and self-trade-prevention
 layers, trade results, and lifecycle events, all encoded as deterministic MessagePack on
 the wire.
