@@ -1,7 +1,6 @@
 //! Trade represents the exchange between maker and taker orders.
 
-use crate::address::Address;
-use crate::base::{Hash32, Quote, Side, Symbol};
+use crate::base::Quote;
 use crate::value::{Price, Quantity, TimestampMs};
 use serde::{Deserialize, Serialize};
 use crate::order::Order;
