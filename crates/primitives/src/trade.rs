@@ -36,14 +36,12 @@ pub struct MatchResult {
     /// The taker side.
     pub taker_side: Side,
 
-    // todo: Avoid the runtime heap allocation on match result constructions.
     /// List of trades that resulted from the match.
     pub trades: Vec<Trade>,
 
     /// Remaining quantity of the taker order after matching.
     pub remaining_quantity: Quantity,
 
-    // todo: Avoid the runtime heap allocation on match result constructions.
     /// Any maker orders that were completely filled and removed from the book.
     pub filled_order_ids: Vec<Hash32>,
 
@@ -55,7 +53,7 @@ pub struct MatchResult {
 ///
 /// All fields are private to enforce immutability after construction.
 /// Use the provided accessor methods to read trade data.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Trade {
     /// Unique trade ID
     pub trade_id: Hash32,

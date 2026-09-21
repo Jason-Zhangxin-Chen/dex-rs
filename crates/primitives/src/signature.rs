@@ -5,7 +5,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::convert::TryInto;
 
 /// The implementation of EVM compatible signature.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signature(pub [u8; 65]);
 
 impl Serialize for Signature {

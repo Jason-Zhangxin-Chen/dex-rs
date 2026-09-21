@@ -7,7 +7,7 @@ use crate::value::{Price, Quantity};
 use serde::{Deserialize, Serialize};
 
 /// A price level in a limit order book, lock-free on the match path.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PriceLevel {
     /// The order queue in time priority.
     orders: OrderQueue,

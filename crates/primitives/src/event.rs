@@ -7,14 +7,12 @@ use crate::signature::Signature;
 use crate::value::{Price, Quantity, TimestampMs};
 use serde::{Deserialize, Serialize};
 
-// todo: impl builder for below types.
-
 /// New Order event
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewOrder(Order);
 
 /// Cancel Order event
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CancelOrder {
     /// The symbol.
     symbol: Symbol,
