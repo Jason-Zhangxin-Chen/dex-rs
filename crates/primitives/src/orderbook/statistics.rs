@@ -3,8 +3,6 @@
 use crate::value::TimestampMs;
 use serde::{Deserialize, Serialize};
 
-// todo: impl the constructors for below types.
-
 /// The statistics of the price level, it helps liquidity distribution analysis.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct PriceLevelStatistics {

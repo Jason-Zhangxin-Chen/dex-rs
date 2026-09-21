@@ -24,6 +24,13 @@ pub struct Order {
     pub cold: OrderCold,
 }
 
+/// Impl the `From` trait thus that we can convert the OrderNode into Order for trade result.
+impl From<OrderNode> for Order {
+    fn from(o: OrderNode) -> Self {
+        Self { hot: o.hot, cold: o.cold }
+    }
+}
+
 /// OrderNode wraps the order and adds extra data for structuring the time priority.
 /// It is split for cache line friendly loading.
 ///
@@ -60,7 +67,7 @@ impl From<Order> for OrderNode {
 #[repr(C)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrderHot {
-    /// (Address, Nonce) works as the key to an order in the book.
+    /// (Address, Nonce) works as the key pointing to an order in the book.
     /// The user address.
     pub user: Address, // 20 Bytes,
     /// The order nonce.
@@ -79,10 +86,13 @@ pub struct OrderHot {
     pub side: Side, // 1 Bytes,
 }
 
+/// OrderCold contains cold data of an order.
 #[repr(C)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrderCold {
+    /// Common cold data of an order.
     pub common: OrderColdCommon,
+    /// Order type specific data.
     pub kind: OrderKind,
 }
 
