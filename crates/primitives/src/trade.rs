@@ -4,15 +4,19 @@ use crate::address::Address;
 use crate::base::{Hash32, Quote, Side, Symbol};
 use crate::value::{Price, Quantity, TimestampMs};
 use serde::{Deserialize, Serialize};
+use crate::order::Order;
 
 /// Enhanced trade result that includes symbol information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradeResult {
     /// The symbol this trade result belongs to
-    pub symbol: Symbol,
+    pub taker_order: Order,
 
-    /// The underlying match result.
-    pub match_result: MatchResult,
+    /// Remaining quantity of the taker order after matching.
+    pub remaining_quantity: Quantity,
+
+    /// Match outcome.
+    pub out_come: MatchOutcome,
 
     /// Total quote-asset notional consumed by this trade, computed as
     /// `Σ price × quantity` across every transaction. Populated for both
@@ -23,30 +27,12 @@ pub struct TradeResult {
     /// Defaults to `0` when deserializing payloads from format versions
     /// that pre-date `quote_notional` so existing consumers keep parsing.
     pub quote_notional: Quote,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MatchResult {
-    /// The taker order ID.
-    pub taker_order_id: Hash32,
-
-    /// The taker address.
-    pub taker_address: Address,
-
-    /// The taker side.
-    pub taker_side: Side,
 
     /// List of trades that resulted from the match.
     pub trades: Vec<Trade>,
 
-    /// Remaining quantity of the taker order after matching.
-    pub remaining_quantity: Quantity,
-
-    /// Any maker orders that were completely filled and removed from the book.
-    pub filled_order_ids: Vec<Hash32>,
-
-    /// Match outcome.
-    pub out_come: MatchOutcome,
+    /// Timestamp when the trade occurred in milliseconds since epoch.
+    pub timestamp: TimestampMs,
 }
 
 /// Represents a completed trade between two orders.
@@ -55,23 +41,14 @@ pub struct MatchResult {
 /// Use the provided accessor methods to read trade data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Trade {
-    /// Unique trade ID
-    pub trade_id: Hash32,
+    /// Maker order.
+    pub maker_order: Order,
 
-    /// ID of the passive order that was in the book
-    pub maker_order_id: Hash32,
-
-    /// The maker address.
-    pub maker_address: Address,
-
-    /// Price at which the trade occurred
+    /// Price at which the trade occurred.
     pub price: Price,
 
-    /// Quantity traded
+    /// Quantity traded.
     pub quantity: Quantity,
-
-    /// Timestamp when the trade occurred in milliseconds since epoch
-    pub timestamp: TimestampMs,
 }
 
 #[repr(u8)]
