@@ -12,9 +12,9 @@ use crate::orderbook::statistics::{BookStatistics, PriceLevelStatistics};
 use crate::orderbook::stp::STPMode;
 use crate::trade::TradeResult;
 use crate::value::{Price, Quantity};
-use rustc_hash::FxHashMap;
 use slab::Slab;
-use std::collections::BTreeMap;
+use std::collections::HashMap;
+use litemap::LiteMap;
 
 /// Trade listener push trade event to the settlement services, to the storage infra and to the
 /// external messaging service.
@@ -37,17 +37,17 @@ pub struct OrderBook {
     /// The arena of orders, all live orders.
     arena: Slab<OrderNode>,
 
-    /// The bids price levels.
-    bids: BTreeMap<Price, PriceLevel>,
+    /// The bids price levels, sorted by Price from high to low, pre-allocated with initial capacity.
+    bids: LiteMap<Price, PriceLevel>,
 
-    /// The asks price levels.
-    asks: BTreeMap<Price, PriceLevel>,
+    /// The asks price levels, sorted by Price from low to high, pre-allocated with initial capacity.
+    asks: LiteMap<Price, PriceLevel>,
 
-    /// Index for an order, use below tuple to replace hash32 for cache line friendly loading.
-    index: FxHashMap<(Address, Nonce), OrderIdx>,
+    /// Index for an order, use the hot data of an order as key for indexing.
+    index: HashMap<(Address, Nonce), OrderIdx>,
 
     /// User orders.
-    user_orders: FxHashMap<Address, Vec<OrderIdx>>,
+    user_orders: HashMap<Address, Vec<OrderIdx>>,
 
     /// Book statistics.
     book_statistics: BookStatistics,
@@ -100,3 +100,4 @@ pub struct OrderBook {
     /// Statistic listener.
     statistic_listener: Option<StatisticListener>,
 }
+
