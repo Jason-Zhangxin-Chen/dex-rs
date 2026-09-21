@@ -6,7 +6,7 @@ license = "Apache-2.0"
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 rustc-hash = {workspace = true}
-slab = {workspace = true}
+slab = {workspace = true, features = ["serde"]}
 util = {version = "0.1.0", path = "../util"}
 
 [dev-dependencies]
