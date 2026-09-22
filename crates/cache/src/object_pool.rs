@@ -2,19 +2,33 @@
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+/// A trait that can reset the content of T.
+pub trait Clear {
+    /// clear reset the content of T to default.
+    fn clear(&mut self);
+}
+
+/// Implement Clear for Vec<T> thus that, the object pool's guard can reset the content on drop.
+impl<T> Clear for Vec<T> {
+    fn clear(&mut self) {
+        self.clear();
+    }
+}
+
 /// A generic object cache / object pool.
 ///
 /// Objects are pre-allocated at construction time. Callers obtain an object
 /// via [`Cache::acquire`], which returns a [`CacheGuard`]. When the guard goes
-/// out of scope the underlying object is automatically returned to the pool
-/// so that it can be reused by another caller (this is the `Drop` behaviour).
+/// out of scope the underlying object is reset via [`Clear::clear`] and then
+/// returned to the pool so that it can be reused by another caller (this is
+/// the `Drop` behaviour).
 ///
 /// The pool can be resized at runtime via [`Cache::resize`].
-pub struct Cache<T> {
+pub struct Cache<T: Clear> {
     inner: Arc<Mutex<Inner<T>>>,
 }
 
-struct Inner<T> {
+struct Inner<T: Clear> {
     /// Objects currently sitting in the pool, ready to be handed out.
     available: Vec<T>,
     /// Factory used to build new objects on demand.
@@ -23,7 +37,7 @@ struct Inner<T> {
     capacity: usize,
 }
 
-impl<T> Cache<T> {
+impl<T: Clear> Cache<T> {
     /// Create a new cache, pre-allocating `initial` items using `factory`.
     pub fn new<F>(initial: usize, factory: F) -> Self
     where
@@ -47,7 +61,7 @@ impl<T> Cache<T> {
     /// If the pool is empty (all objects are checked out) a new object is
     /// created on the fly using the factory. The returned [`CacheGuard`]
     /// dereferences to `&mut T` and returns the object to the pool when
-    /// dropped.
+    /// dropped, after resetting its content via [`Clear::clear`].
     pub fn acquire(&self) -> CacheGuard<T> {
         let item = {
             let mut inner = self.lock();
@@ -95,7 +109,7 @@ impl<T> Cache<T> {
     }
 }
 
-impl<T> Clone for Cache<T> {
+impl<T: Clear> Clone for Cache<T> {
     fn clone(&self) -> Self {
         Self { inner: Arc::clone(&self.inner) }
     }
@@ -103,23 +117,24 @@ impl<T> Clone for Cache<T> {
 
 /// RAII guard holding a checked-out object.
 ///
-/// Dereferences to `T`. When dropped, the object is returned to the pool
-/// (or freed if the pool is already at capacity).
-pub struct CacheGuard<T> {
+/// Dereferences to `T`. When dropped, the object is reset via [`Clear::clear`]
+/// and returned to the pool (or freed if the pool is already at capacity).
+pub struct CacheGuard<T: Clear> {
     inner: Arc<Mutex<Inner<T>>>,
     item: Option<T>,
 }
 
-impl<T> CacheGuard<T> {
+impl<T: Clear> CacheGuard<T> {
     /// Consume the guard and take ownership of the object *without* returning
-    /// it to the pool. Useful when the object is in a broken state and should
-    /// not be reused.
+    /// it to the pool. The content is preserved — [`Clear::clear`] is not
+    /// called. Useful when the object is in a broken state and should not be
+    /// reused.
     pub fn take(mut self) -> T {
         self.item.take().expect("guard already consumed")
     }
 }
 
-impl<T> Deref for CacheGuard<T> {
+impl<T: Clear> Deref for CacheGuard<T> {
     type Target = T;
     #[inline]
     fn deref(&self) -> &T {
@@ -127,18 +142,20 @@ impl<T> Deref for CacheGuard<T> {
     }
 }
 
-impl<T> DerefMut for CacheGuard<T> {
+impl<T: Clear> DerefMut for CacheGuard<T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut T {
         self.item.as_mut().expect("guard already consumed")
     }
 }
 
-impl<T> Drop for CacheGuard<T> {
+impl<T: Clear> Drop for CacheGuard<T> {
     fn drop(&mut self) {
-        if let Some(item) = self.item.take() {
+        if let Some(mut item) = self.item.take() {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             if inner.available.len() < inner.capacity {
+                // Reset the content before handing the object back to the pool.
+                item.clear();
                 inner.available.push(item);
             }
             // else: pool is at capacity, `item` is dropped here.
@@ -165,6 +182,12 @@ mod tests {
         }
     }
 
+    impl Clear for TestItem {
+        fn clear(&mut self) {
+            self.value = 0;
+        }
+    }
+
     impl Drop for TestItem {
         fn drop(&mut self) {
             self.live.fetch_sub(1, Ordering::SeqCst);
@@ -183,7 +206,7 @@ mod tests {
     #[test]
     fn test_linear_set() {
         let cap = 100usize;
-        let cache: Cache<LinearItem<u32>> = Cache::new(cap, || LinearItem::new());
+        let cache: Cache<LinearItem<u32>> = Cache::new(cap, LinearItem::new);
 
         assert_eq!(cache.available(), 100usize);
 
@@ -194,9 +217,8 @@ mod tests {
         drop(v1);
         assert_eq!(cache.available(), cap);
 
-        let mut v2 = cache.acquire();
-        v2.clear();
-        assert!(v2.is_empty(), "item should be reset");
+        let v2 = cache.acquire();
+        assert!(v2.is_empty(), "item should be reset by Clear when returned");
         drop(v2);
     }
 
@@ -292,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn test_item_reuse_keeps_state() {
+    fn test_item_is_cleared_on_return() {
         let (cache, live) = make_cache(1);
         {
             let mut g = cache.acquire();
@@ -301,16 +323,19 @@ mod tests {
         assert_eq!(live.load(Ordering::SeqCst), 1);
         {
             let g = cache.acquire();
-            // Same instance came back — no new allocation.
-            assert_eq!(g.value, 42);
+            // Same instance came back — no new allocation — and the content
+            // was reset by Clear when the previous guard was dropped.
+            assert_eq!(g.value, 0);
         }
     }
 
     #[test]
     fn test_take_removes_from_pool() {
         let (cache, live) = make_cache(2);
-        let g = cache.acquire();
-        let _item = g.take(); // object now owned by caller, never returned
+        let mut g = cache.acquire();
+        g.value = 7;
+        let _item = g.take(); // object now owned by caller, never returned, not cleared
+        assert_eq!(_item.value, 7);
         assert_eq!(cache.available(), 1);
 
         // Remove the last object permanently too.
