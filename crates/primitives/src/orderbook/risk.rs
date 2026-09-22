@@ -36,6 +36,35 @@ pub struct RiskConfig {
     reference_price: Option<ReferencePriceSource>,
 }
 
+impl RiskConfig {
+    /// Sets the maximum notional (`price × quantity`, in raw ticks) a single
+    /// account may have resting on this book at any time.
+    pub fn with_max_notional_per_account(mut self, max_notional_per_account: u128) -> Self {
+        self.max_notional_per_account = Some(max_notional_per_account);
+        self
+    }
+
+    /// Sets the maximum allowed deviation in basis points between an incoming
+    /// limit price and the resolved reference price.
+    pub fn with_price_band_bps(mut self, price_band_bps: u32) -> Self {
+        self.price_band_bps = Some(price_band_bps);
+        self
+    }
+
+    /// Sets the maximum number of resting orders a single account may have on
+    /// this book at any time.
+    pub fn with_max_open_orders_per_account(mut self, max_open_orders_per_account: u32) -> Self {
+        self.max_open_orders_per_account = Some(max_open_orders_per_account);
+        self
+    }
+
+    /// Sets the reference price source used by the price-band check.
+    pub fn with_reference_price(mut self, reference_price: ReferencePriceSource) -> Self {
+        self.reference_price = Some(reference_price);
+        self
+    }
+}
+
 /// Per-account counters maintained by [`RiskState`].
 ///
 /// Counters are updated with `Relaxed` ordering on the hot path. They
@@ -83,4 +112,35 @@ pub enum ReferencePriceSource {
     /// Caller-supplied fixed reference price (raw integer ticks). The
     /// check always runs.
     FixedPrice(Price),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------------------------------------------------------------
+    // RiskConfig
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_risk_config_defaults() {
+        let config = RiskConfig::default();
+        assert_eq!(config.max_notional_per_account, None);
+        assert_eq!(config.price_band_bps, None);
+        assert_eq!(config.max_open_orders_per_account, None);
+        assert_eq!(config.reference_price, None);
+    }
+
+    #[test]
+    fn test_risk_config_with_setters() {
+        let config = RiskConfig::default()
+            .with_max_notional_per_account(1_000_000)
+            .with_price_band_bps(50)
+            .with_max_open_orders_per_account(100)
+            .with_reference_price(ReferencePriceSource::FixedPrice(Price(42)));
+        assert_eq!(config.max_notional_per_account, Some(1_000_000));
+        assert_eq!(config.price_band_bps, Some(50));
+        assert_eq!(config.max_open_orders_per_account, Some(100));
+        assert_eq!(config.reference_price, Some(ReferencePriceSource::FixedPrice(Price(42))));
+    }
 }
