@@ -36,6 +36,9 @@ pub struct OrderBook {
     config: BookConfig,
 
     /// The core state of the book, it should be recoverable from disaster.
+    /// The oms take snapshot of it and store to an append only journal.
+    /// With the message offset in wire protocols and the snapshot, the recovery
+    /// is base on a snapshot + delta process to rebuild the state of the book.
     state: OrderBookState,
 
     /// Clock source for ms.
