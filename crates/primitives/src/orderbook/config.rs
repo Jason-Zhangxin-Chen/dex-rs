@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// BookConfig owns the config data of the book.
 #[repr(C)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BookConfig {
     /// hot configs to be loaded during runtime.
     pub hot: BookConfigHot,
@@ -17,9 +17,23 @@ pub struct BookConfig {
     pub cold: BookConfigCold,
 }
 
+impl BookConfig {
+    /// Sets the hot configs of the book.
+    pub fn with_hot(mut self, hot: BookConfigHot) -> Self {
+        self.hot = hot;
+        self
+    }
+
+    /// Sets the cold configs of the book.
+    pub fn with_cold(mut self, cold: BookConfigCold) -> Self {
+        self.cold = cold;
+        self
+    }
+}
+
 /// BookConfigCold owns the cold configs of the order book.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct BookConfigCold {
     /// Capacity of pre-allocated [`OrderNode`] slab.
     pub arena_size: Option<u32>,
@@ -37,9 +51,41 @@ pub struct BookConfigCold {
     pub symbol: Symbol,
 }
 
+impl BookConfigCold {
+    /// Sets the capacity of the pre-allocated order node slab.
+    pub fn with_arena_size(mut self, arena_size: u32) -> Self {
+        self.arena_size = Some(arena_size);
+        self
+    }
+
+    /// Sets the capacity of the order index map.
+    pub fn with_order_index_size(mut self, order_index_size: u32) -> Self {
+        self.order_index_size = Some(order_index_size);
+        self
+    }
+
+    /// Sets the capacity of the user orders map.
+    pub fn with_user_order_map_size(mut self, user_order_map_size: u32) -> Self {
+        self.user_order_map_size = Some(user_order_map_size);
+        self
+    }
+
+    /// Sets the capacity of the sorted map of price levels.
+    pub fn with_map_price_level_size(mut self, map_price_level_size: u16) -> Self {
+        self.map_price_level_size = Some(map_price_level_size);
+        self
+    }
+
+    /// Sets the market symbol for the book.
+    pub fn with_symbol(mut self, symbol: Symbol) -> Self {
+        self.symbol = symbol;
+        self
+    }
+}
+
 /// BookConfigHot owns the hot configs for the book that are used frequently by the book.
 #[repr(C)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BookConfigHot {
     /// Minimum price increment for orders. When set, order prices must be
     /// exact multiples of this value. `None` disables validation (default).
@@ -62,4 +108,140 @@ pub struct BookConfigHot {
 
     /// STP mode controls the engine behavior over self-trade events.
     pub stp_mode: STPMode,
+}
+
+impl BookConfigHot {
+    /// Sets the minimum price increment for orders.
+    pub fn with_tick_size(mut self, tick_size: Price) -> Self {
+        self.tick_size = Some(tick_size);
+        self
+    }
+
+    /// Sets the minimum quantity increment for orders.
+    pub fn with_lot_size(mut self, lot_size: Quantity) -> Self {
+        self.lot_size = Some(lot_size);
+        self
+    }
+
+    /// Sets the minimum order size.
+    pub fn with_min_order_size(mut self, min_order_size: Quantity) -> Self {
+        self.min_order_size = Some(min_order_size);
+        self
+    }
+
+    /// Sets the maximum order size.
+    pub fn with_max_order_size(mut self, max_order_size: Quantity) -> Self {
+        self.max_order_size = Some(max_order_size);
+        self
+    }
+
+    /// Sets the risk config bound to the book.
+    pub fn with_risk_config(mut self, risk_config: RiskConfig) -> Self {
+        self.risk_config = Some(risk_config);
+        self
+    }
+
+    /// Sets the STP mode that controls the engine behavior over self-trade events.
+    pub fn with_stp_mode(mut self, stp_mode: STPMode) -> Self {
+        self.stp_mode = stp_mode;
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------------------------------------------------------------
+    // BookConfigHot
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_hot_config_defaults() {
+        let hot = BookConfigHot::default();
+        assert_eq!(hot.tick_size, None);
+        assert_eq!(hot.lot_size, None);
+        assert_eq!(hot.min_order_size, None);
+        assert_eq!(hot.max_order_size, None);
+        assert_eq!(hot.risk_config, None);
+        assert_eq!(hot.stp_mode, STPMode::None);
+    }
+
+    #[test]
+    fn test_hot_config_with_setters() {
+        let risk_config = RiskConfig::default().with_max_open_orders_per_account(8);
+        let hot = BookConfigHot::default()
+            .with_tick_size(Price(1))
+            .with_lot_size(Quantity(2))
+            .with_min_order_size(Quantity(3))
+            .with_max_order_size(Quantity(4))
+            .with_risk_config(risk_config.clone())
+            .with_stp_mode(STPMode::CancelBoth);
+        assert_eq!(hot.tick_size, Some(Price(1)));
+        assert_eq!(hot.lot_size, Some(Quantity(2)));
+        assert_eq!(hot.min_order_size, Some(Quantity(3)));
+        assert_eq!(hot.max_order_size, Some(Quantity(4)));
+        assert_eq!(hot.risk_config, Some(risk_config));
+        assert_eq!(hot.stp_mode, STPMode::CancelBoth);
+    }
+
+    // ---------------------------------------------------------------
+    // BookConfigCold
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_cold_config_defaults() {
+        let cold = BookConfigCold::default();
+        assert_eq!(cold.arena_size, None);
+        assert_eq!(cold.order_index_size, None);
+        assert_eq!(cold.user_order_map_size, None);
+        assert_eq!(cold.map_price_level_size, None);
+        assert_eq!(cold.symbol, Symbol::default());
+    }
+
+    #[test]
+    fn test_cold_config_with_setters() {
+        let cold = BookConfigCold::default()
+            .with_arena_size(1_000)
+            .with_order_index_size(2_000)
+            .with_user_order_map_size(3_000)
+            .with_map_price_level_size(256)
+            .with_symbol(Symbol([1u8; 32]));
+        assert_eq!(cold.arena_size, Some(1_000));
+        assert_eq!(cold.order_index_size, Some(2_000));
+        assert_eq!(cold.user_order_map_size, Some(3_000));
+        assert_eq!(cold.map_price_level_size, Some(256));
+        assert_eq!(cold.symbol, Symbol([1u8; 32]));
+    }
+
+    // ---------------------------------------------------------------
+    // BookConfig
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_book_config_defaults() {
+        let config = BookConfig::default();
+        assert_eq!(config.hot.tick_size, None);
+        assert_eq!(config.hot.lot_size, None);
+        assert_eq!(config.hot.min_order_size, None);
+        assert_eq!(config.hot.max_order_size, None);
+        assert_eq!(config.hot.risk_config, None);
+        assert_eq!(config.hot.stp_mode, STPMode::None);
+        assert_eq!(config.cold.arena_size, None);
+        assert_eq!(config.cold.order_index_size, None);
+        assert_eq!(config.cold.user_order_map_size, None);
+        assert_eq!(config.cold.map_price_level_size, None);
+        assert_eq!(config.cold.symbol, Symbol::default());
+    }
+
+    #[test]
+    fn test_book_config_composes_hot_and_cold() {
+        let config = BookConfig::default()
+            .with_hot(BookConfigHot::default().with_tick_size(Price(5)))
+            .with_cold(BookConfigCold::default().with_symbol(Symbol([9u8; 32])));
+        assert_eq!(config.hot.tick_size, Some(Price(5)));
+        assert_eq!(config.hot.stp_mode, STPMode::None);
+        assert_eq!(config.cold.symbol, Symbol([9u8; 32]));
+        assert_eq!(config.cold.arena_size, None);
+    }
 }
