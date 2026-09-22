@@ -1,7 +1,7 @@
 //! Pre-trade risk layer for orderbook.
 
 use crate::address::Address;
-use crate::base::{Nonce};
+use crate::base::Nonce;
 use crate::value::{Price, Quantity};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};

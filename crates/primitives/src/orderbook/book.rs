@@ -1,21 +1,21 @@
 //! Orderbook definitions.
 
 use crate::address::Address;
-use crate::base::{Nonce};
+use crate::base::Nonce;
 use crate::clock::Clock;
 use crate::event::PriceLevelChangedEvent;
 use crate::order::{Order, OrderIdx, OrderNode};
+use crate::orderbook::config::BookConfig;
 use crate::orderbook::order_status::OrderStatus;
 use crate::orderbook::price_level::PriceLevel;
 use crate::orderbook::risk::RiskState;
 use crate::orderbook::statistics::{BookStatistics, PriceLevelStatistics};
 use crate::trade::TradeResult;
-use crate::value::{Price};
-use slab::Slab;
+use crate::value::Price;
 use litemap::LiteMap;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
-use crate::orderbook::config::BookConfig;
+use slab::Slab;
 
 /// Trade listener push trade event to the settlement services, to the storage infra and to the
 /// external messaging service.

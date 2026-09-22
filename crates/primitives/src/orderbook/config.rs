@@ -1,10 +1,10 @@
 //! Config for the orderbook.
 
-use serde::{Deserialize, Serialize};
 use crate::base::Symbol;
 use crate::orderbook::risk::RiskConfig;
 use crate::orderbook::stp::STPMode;
 use crate::value::{Price, Quantity};
+use serde::{Deserialize, Serialize};
 
 /// BookConfig owns the config data of the book.
 #[repr(C)]
@@ -32,7 +32,7 @@ pub struct BookConfigCold {
 
     /// Capacity of sorted map of price levels.
     pub map_price_level_size: Option<u16>,
-    
+
     /// Market Symbol for the book.
     pub symbol: Symbol,
 }
@@ -63,5 +63,3 @@ pub struct BookConfigHot {
     /// STP mode controls the engine behavior over self-trade events.
     pub stp_mode: STPMode,
 }
-
-
