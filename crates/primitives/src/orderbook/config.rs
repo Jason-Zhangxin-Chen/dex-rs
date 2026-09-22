@@ -35,20 +35,32 @@ impl BookConfig {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct BookConfigCold {
-    /// Capacity of pre-allocated [`OrderNode`] slab.
-    pub arena_size: Option<u32>,
-
-    /// Capacity of order index map.
-    pub order_index_size: Option<u32>,
-
-    /// Capacity of user orders map.
-    pub user_order_map_size: Option<u32>,
-
-    /// Capacity of sorted map of price levels.
-    pub map_price_level_size: Option<u16>,
-
     /// Market Symbol for the book.
     pub symbol: Symbol,
+
+    /// Initial capacity of pre-allocated [`OrderNode`] slab.
+    pub arena_size: Option<u32>,
+
+    /// Initial capacity of order index map.
+    pub order_index_size: Option<u32>,
+
+    /// Initial capacity of user orders map.
+    pub user_order_map_size: Option<u32>,
+
+    /// Initial capacity of a trade list.
+    pub trade_list_size: Option<u32>,
+
+    /// Initial capacity of cache of order index list pool.
+    pub order_index_list_pool_size: Option<u32>,
+
+    /// Initial capacity of index list.
+    pub order_index_list_size: Option<u32>,
+
+    /// Initial capacity of sorted map of price levels.
+    pub price_level_map_size: Option<u16>,
+
+    /// Initial capacity of cache of trade list pool.
+    pub trade_list_pool_size: Option<u8>,
 }
 
 impl BookConfigCold {
@@ -72,7 +84,31 @@ impl BookConfigCold {
 
     /// Sets the capacity of the sorted map of price levels.
     pub fn with_map_price_level_size(mut self, map_price_level_size: u16) -> Self {
-        self.map_price_level_size = Some(map_price_level_size);
+        self.price_level_map_size = Some(map_price_level_size);
+        self
+    }
+
+    /// Set the capacity of the order index list pool size.
+    pub fn with_order_index_list_pool_size(mut self, order_index_list_size: u32) -> Self {
+        self.order_index_list_pool_size = Some(order_index_list_size);
+        self
+    }
+
+    /// Set the capacity of the order index list size.
+    pub fn with_order_index_list_size(mut self, order_index_list_size: u32) -> Self {
+        self.order_index_list_size = Some(order_index_list_size);
+        self
+    }
+
+    /// Set the capacity of the trade list pool size.
+    pub fn with_trade_list_pool_size(mut self, trade_list_pool_size: u8) -> Self {
+        self.trade_list_pool_size = Some(trade_list_pool_size);
+        self
+    }
+
+    /// Set the capacity of the trade list size.
+    pub fn with_trade_list_size(mut self, trade_list_size: u32) -> Self {
+        self.trade_list_size = Some(trade_list_size);
         self
     }
 
@@ -195,7 +231,11 @@ mod tests {
         assert_eq!(cold.arena_size, None);
         assert_eq!(cold.order_index_size, None);
         assert_eq!(cold.user_order_map_size, None);
-        assert_eq!(cold.map_price_level_size, None);
+        assert_eq!(cold.price_level_map_size, None);
+        assert_eq!(cold.order_index_list_pool_size, None);
+        assert_eq!(cold.order_index_list_size, None);
+        assert_eq!(cold.trade_list_pool_size, None);
+        assert_eq!(cold.trade_list_size, None);
         assert_eq!(cold.symbol, Symbol::default());
     }
 
@@ -206,11 +246,19 @@ mod tests {
             .with_order_index_size(2_000)
             .with_user_order_map_size(3_000)
             .with_map_price_level_size(256)
+            .with_order_index_list_pool_size(128u32)
+            .with_order_index_list_size(u32::MAX)
+            .with_trade_list_size(2_000u32)
+            .with_trade_list_pool_size(128u8)
             .with_symbol(Symbol([1u8; 32]));
         assert_eq!(cold.arena_size, Some(1_000));
         assert_eq!(cold.order_index_size, Some(2_000));
         assert_eq!(cold.user_order_map_size, Some(3_000));
-        assert_eq!(cold.map_price_level_size, Some(256));
+        assert_eq!(cold.price_level_map_size, Some(256));
+        assert_eq!(cold.order_index_list_pool_size, Some(128));
+        assert_eq!(cold.order_index_list_size, Some(u32::MAX));
+        assert_eq!(cold.trade_list_size, Some(2_000u32));
+        assert_eq!(cold.trade_list_pool_size, Some(128u8));
         assert_eq!(cold.symbol, Symbol([1u8; 32]));
     }
 
@@ -230,7 +278,11 @@ mod tests {
         assert_eq!(config.cold.arena_size, None);
         assert_eq!(config.cold.order_index_size, None);
         assert_eq!(config.cold.user_order_map_size, None);
-        assert_eq!(config.cold.map_price_level_size, None);
+        assert_eq!(config.cold.price_level_map_size, None);
+        assert_eq!(config.cold.order_index_list_pool_size, None);
+        assert_eq!(config.cold.order_index_list_size, None);
+        assert_eq!(config.cold.trade_list_size, None);
+        assert_eq!(config.cold.trade_list_pool_size, None);
         assert_eq!(config.cold.symbol, Symbol::default());
     }
 
