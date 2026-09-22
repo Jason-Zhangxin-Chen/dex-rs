@@ -2,9 +2,12 @@
 
 use crate::address::Address;
 use crate::base::Nonce;
+use crate::orderbook::config::RiskConfig;
 use crate::value::{Price, Quantity};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
+
+// todo: impl the risk logics within this file.
 
 /// Risk state bound to a single [`OrderBook`](crate::OrderBook).
 ///
@@ -14,55 +17,14 @@ use serde::{Deserialize, Serialize};
 /// are no-ops when `config` is `None`.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RiskState {
+    /// RiskState contains the risk config for risk handling.
+    risk_config: RiskConfig,
+    /// Tracked risk counters for per account.
     counters: FxHashMap<Address, RiskCounters>,
+    /// Tracked risk entry for per order.
     orders: FxHashMap<(Address, Nonce), RiskEntry>,
+    /// one-shot warning latch for the "no reference price available" code path.
     warned_no_reference: bool,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RiskConfig {
-    /// Maximum notional (`price × quantity`, in raw ticks) a single
-    /// account may have resting on this book at any time. `None`
-    /// disables the check.
-    max_notional_per_account: Option<u128>,
-    /// Maximum allowed deviation in basis points between an incoming
-    /// limit price and the resolved reference price. `None` (or
-    /// `reference_price = None`) disables the check.
-    price_band_bps: Option<u32>,
-    /// Maximum number of resting orders a single account may have on
-    /// this book at any time. `None` disables the check.
-    max_open_orders_per_account: Option<u32>,
-    /// Reference price source used by the price-band check.
-    reference_price: Option<ReferencePriceSource>,
-}
-
-impl RiskConfig {
-    /// Sets the maximum notional (`price × quantity`, in raw ticks) a single
-    /// account may have resting on this book at any time.
-    pub fn with_max_notional_per_account(mut self, max_notional_per_account: u128) -> Self {
-        self.max_notional_per_account = Some(max_notional_per_account);
-        self
-    }
-
-    /// Sets the maximum allowed deviation in basis points between an incoming
-    /// limit price and the resolved reference price.
-    pub fn with_price_band_bps(mut self, price_band_bps: u32) -> Self {
-        self.price_band_bps = Some(price_band_bps);
-        self
-    }
-
-    /// Sets the maximum number of resting orders a single account may have on
-    /// this book at any time.
-    pub fn with_max_open_orders_per_account(mut self, max_open_orders_per_account: u32) -> Self {
-        self.max_open_orders_per_account = Some(max_open_orders_per_account);
-        self
-    }
-
-    /// Sets the reference price source used by the price-band check.
-    pub fn with_reference_price(mut self, reference_price: ReferencePriceSource) -> Self {
-        self.reference_price = Some(reference_price);
-        self
-    }
 }
 
 /// Per-account counters maintained by [`RiskState`].
