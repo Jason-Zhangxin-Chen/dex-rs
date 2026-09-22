@@ -1,7 +1,7 @@
 //! Orderbook definitions.
 
 use crate::address::Address;
-use crate::base::Nonce;
+use crate::base::{Nonce, Symbol};
 use crate::clock::Clock;
 use crate::order::{OrderIdx, OrderNode};
 use crate::orderbook::config::BookConfig;
@@ -41,6 +41,12 @@ pub struct OrderBook {
 /// OrderBookState stores the runtime state of the book, it should be recoverable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderBookState {
+    /// Symbol of the book, to be snapshot too.
+    /// It is important to check the book recovered from a snapshot has the same symbol
+    /// as the configured one, it prevents miss configuration which will introduce wrong
+    /// task routing in the wire protocols (Kafka / Redpanda).
+    symbol: Symbol,
+
     /// The arena of orders, all live orders.
     arena: Slab<OrderNode>,
 
@@ -76,8 +82,13 @@ pub struct OrderBookState {
 /// # A pool of Vec<Trade> which is used for TradeResult reporting.
 /// # A pool of Vec<OrderIdx> which is used for tracking per user's orders.
 pub struct ObjectPools {
-    /// Pool of trade list.
+    /// Pool of trade list. Although the core is running within single thread, however the reporting
+    /// is none blocking, thus we need multiple instance of Vec<Trade> for trade event reporting.
+    /// The length of the Vec<Trade> is configurable too.
     pub trade_list_pool: Cache<Vec<Trade>>,
-    /// Pool of order index list.
+    /// Pool of order index list. As the risk config contains max_open_orders_per_account, thus the
+    /// length of this Vec<OrderIdx> should not exceed this value. The capacity of order_idx_list_pool
+    /// is determined by the number of users who are opening trades on the system, we config one
+    /// initially capacity, and it grows on runtime.
     pub order_idx_list_pool: Cache<Vec<OrderIdx>>,
 }
