@@ -1,20 +1,21 @@
 //! Orderbook definitions.
 
 use crate::address::Address;
-use crate::base::{Nonce, Symbol};
+use crate::base::Nonce;
 use crate::clock::Clock;
 use crate::event::PriceLevelChangedEvent;
 use crate::order::{Order, OrderIdx, OrderNode};
+use crate::orderbook::config::BookConfig;
 use crate::orderbook::order_status::OrderStatus;
 use crate::orderbook::price_level::PriceLevel;
 use crate::orderbook::risk::RiskState;
 use crate::orderbook::statistics::{BookStatistics, PriceLevelStatistics};
-use crate::orderbook::stp::STPMode;
 use crate::trade::TradeResult;
-use crate::value::{Price, Quantity};
-use slab::Slab;
-use std::collections::HashMap;
+use crate::value::Price;
 use litemap::LiteMap;
+use rustc_hash::FxHashMap;
+use serde::{Deserialize, Serialize};
+use slab::Slab;
 
 /// Trade listener push trade event to the settlement services, to the storage infra and to the
 /// external messaging service.
@@ -31,9 +32,41 @@ pub type StatisticListener = Box<dyn Fn(BookStatistics, Vec<PriceLevelStatistics
 
 /// OrderBook
 pub struct OrderBook {
-    /// Kill switch.
-    kill_switch: bool,
+    /// BookConfigs of the orderbook.
+    config: BookConfig,
 
+    /// The core state of the book, it should be recoverable from disaster.
+    /// The oms take snapshot of it and store to an append only journal.
+    /// With the message offset in wire protocols and the snapshot, the recovery
+    /// is base on a snapshot + delta process to rebuild the state of the book.
+    state: OrderBookState,
+
+    /// Clock source for ms.
+    clock: Box<dyn Clock>,
+
+    /// Listeners push events to external systems, they are not blocking.
+    listeners: Listeners,
+}
+
+/// Listeners collect a set of callback closure to notify engine event to external system.
+/// They are none blocking functions.
+pub struct Listeners {
+    /// Trade listener listens to possible trades when an order is added.
+    trade_listener: Option<TradeListener>,
+
+    /// Price level change listener listens to price level changes and push it to external system.
+    price_level_changed_listener: Option<PriceLevelChangedListener>,
+
+    /// Order status listener listens to order status and push it to external system.
+    order_status_listener: Option<OrderStatusListener>,
+
+    /// Statistic listener listens to the statistic changes event and push it to external system.
+    statistic_listener: Option<StatisticListener>,
+}
+
+/// OrderBookState stores the runtime state of the book, it should be recoverable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderBookState {
     /// The arena of orders, all live orders.
     arena: Slab<OrderNode>,
 
@@ -44,10 +77,10 @@ pub struct OrderBook {
     asks: LiteMap<Price, PriceLevel>,
 
     /// Index for an order, use the hot data of an order as key for indexing.
-    index: HashMap<(Address, Nonce), OrderIdx>,
+    index: FxHashMap<(Address, Nonce), OrderIdx>,
 
-    /// User orders.
-    user_orders: HashMap<Address, Vec<OrderIdx>>,
+    /// User orders. todo: use TLS vector pool for this to avoid allocation.
+    user_orders: FxHashMap<Address, Vec<OrderIdx>>,
 
     /// Book statistics.
     book_statistics: BookStatistics,
@@ -61,43 +94,6 @@ pub struct OrderBook {
     /// Flag indicating if there was a trade.
     has_traded: bool,
 
-    /// Minimum price increment for orders. When set, order prices must be
-    /// exact multiples of this value. `None` disables validation (default).
-    tick_size: Option<Price>,
-
-    /// Minimum quantity increment for orders. When set, order quantities must be
-    /// exact multiples of this value. `None` disables validation (default).
-    lot_size: Option<Quantity>,
-
-    /// Minimum order size. When set, orders with `total_quantity() < min` are
-    /// rejected. `None` disables validation (default).
-    min_order_size: Option<Quantity>,
-
-    /// Maximum order size. When set, orders with `total_quantity() > max` are
-    /// rejected. `None` disables validation (default).
-    max_order_size: Option<Quantity>,
-
-    /// STP mode.
-    stp_mode: STPMode,
-
-    /// Clock source for ms.
-    clock: Box<dyn Clock>,
-
-    /// The market symbol.
-    symbol: Symbol,
-
-    /// Listeners push events to external systems, they are not blocking.
-
-    /// Listens to possible trades when an order is added.
-    trade_listener: Option<TradeListener>,
-
-    /// Price level change listener.
-    price_level_changed_listener: Option<PriceLevelChangedListener>,
-
-    /// Order status listener.
-    order_status_listener: Option<OrderStatusListener>,
-
-    /// Statistic listener.
-    statistic_listener: Option<StatisticListener>,
+    /// Kill switch.
+    kill_switch: bool,
 }
-

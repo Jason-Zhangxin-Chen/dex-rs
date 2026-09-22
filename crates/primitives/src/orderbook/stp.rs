@@ -26,6 +26,7 @@
 
 use serde::{Deserialize, Serialize};
 
+/// STPMode controls the engine behavior over self-trade events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum STPMode {
