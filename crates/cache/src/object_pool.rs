@@ -180,8 +180,6 @@ mod tests {
 
     type LinearItem<T> = Vec<T>;
 
-
-
     #[test]
     fn test_linear_set() {
         let cap = 100usize;
