@@ -6,6 +6,9 @@ use crate::orderbook::statistics::PriceLevelStatistics;
 use crate::value::{Price, Quantity};
 use serde::{Deserialize, Serialize};
 
+// todo: impl the price level internal logics in this file.
+//  it include the setup of it, match logic inside the level.
+
 /// A price level in a limit order book, lock-free on the match path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PriceLevel {

@@ -17,6 +17,9 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use slab::Slab;
 
+// todo: impl the orderbook internal logics in this file.
+//  it includes, setup of order book, matching logics, state manipulations, and event publishing.
+
 /// OrderBook
 pub struct OrderBook {
     /// Pre-allocated object pools to avoid runtime heap allocation.
