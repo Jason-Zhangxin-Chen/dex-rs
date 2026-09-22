@@ -27,7 +27,8 @@ pub struct TradeResult {
     /// that pre-date `quote_notional` so existing consumers keep parsing.
     pub quote_notional: Quote,
 
-    /// List of trades that resulted from the match.
+    /// List of trades that resulted from the match. The vector<Trade> is pooled
+    /// in the free cache with RAII guard.
     pub trades: Vec<Trade>,
 
     /// Timestamp when the trade occurred in milliseconds since epoch.

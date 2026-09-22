@@ -9,7 +9,9 @@ use crate::orderbook::listener::Listeners;
 use crate::orderbook::price_level::PriceLevel;
 use crate::orderbook::risk::RiskState;
 use crate::orderbook::statistics::BookStatistics;
+use crate::trade::Trade;
 use crate::value::Price;
+use cache::object_pool::Cache;
 use litemap::LiteMap;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -17,6 +19,9 @@ use slab::Slab;
 
 /// OrderBook
 pub struct OrderBook {
+    /// Pre-allocated object pools to avoid runtime heap allocation.
+    object_pools: ObjectPools,
+
     /// BookConfigs of the orderbook.
     config: BookConfig,
 
@@ -48,7 +53,7 @@ pub struct OrderBookState {
     /// Index for an order, use the hot data of an order as key for indexing.
     index: FxHashMap<(Address, Nonce), OrderIdx>,
 
-    /// User orders. todo: use TLS vector pool for this to avoid allocation.
+    /// User orders. The vector<OrderIdx> is pooled in the free cache with RAII guard.
     user_orders: FxHashMap<Address, Vec<OrderIdx>>,
 
     /// Book statistics.
@@ -65,4 +70,14 @@ pub struct OrderBookState {
 
     /// Kill switch.
     kill_switch: bool,
+}
+
+/// A set of pre-allocated object pools for the book, it contains:
+/// # A pool of Vec<Trade> which is used for TradeResult reporting.
+/// # A pool of Vec<OrderIdx> which is used for tracking per user's orders.
+pub struct ObjectPools {
+    /// Pool of trade list.
+    pub trade_list_pool: Cache<Vec<Trade>>,
+    /// Pool of order index list.
+    pub order_idx_list_pool: Cache<Vec<OrderIdx>>,
 }

@@ -10,6 +10,7 @@ litemap = {workspace = true, features = ["serde"]}
 serde = { workspace = true, features = ["derive"] }
 
 util = {version = "0.1.0", path = "../util"}
+cache = {version = "0.1.0", path = "../cache"}
 
 [dev-dependencies]
 rmp-serde = {workspace = true}
