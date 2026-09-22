@@ -1,7 +1,7 @@
 //! Config for the orderbook.
 
 use crate::base::Symbol;
-use crate::orderbook::risk::RiskConfig;
+use crate::orderbook::risk::ReferencePriceSource;
 use crate::orderbook::stp::STPMode;
 use crate::value::{Price, Quantity};
 use serde::{Deserialize, Serialize};
@@ -180,6 +180,53 @@ impl BookConfigHot {
     /// Sets the STP mode that controls the engine behavior over self-trade events.
     pub fn with_stp_mode(mut self, stp_mode: STPMode) -> Self {
         self.stp_mode = stp_mode;
+        self
+    }
+}
+
+/// RiskConfig of an orderbook.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RiskConfig {
+    /// Maximum notional (`price × quantity`, in raw ticks) a single
+    /// account may have resting on this book at any time. `None`
+    /// disables the check.
+    pub max_notional_per_account: Option<u128>,
+    /// Maximum allowed deviation in basis points between an incoming
+    /// limit price and the resolved reference price. `None` (or
+    /// `reference_price = None`) disables the check.
+    pub price_band_bps: Option<u32>,
+    /// Maximum number of resting orders a single account may have on
+    /// this book at any time. `None` disables the check.
+    pub max_open_orders_per_account: Option<u32>,
+    /// Reference price source used by the price-band check.
+    pub reference_price: Option<ReferencePriceSource>,
+}
+
+impl RiskConfig {
+    /// Sets the maximum notional (`price × quantity`, in raw ticks) a single
+    /// account may have resting on this book at any time.
+    pub fn with_max_notional_per_account(mut self, max_notional_per_account: u128) -> Self {
+        self.max_notional_per_account = Some(max_notional_per_account);
+        self
+    }
+
+    /// Sets the maximum allowed deviation in basis points between an incoming
+    /// limit price and the resolved reference price.
+    pub fn with_price_band_bps(mut self, price_band_bps: u32) -> Self {
+        self.price_band_bps = Some(price_band_bps);
+        self
+    }
+
+    /// Sets the maximum number of resting orders a single account may have on
+    /// this book at any time.
+    pub fn with_max_open_orders_per_account(mut self, max_open_orders_per_account: u32) -> Self {
+        self.max_open_orders_per_account = Some(max_open_orders_per_account);
+        self
+    }
+
+    /// Sets the reference price source used by the price-band check.
+    pub fn with_reference_price(mut self, reference_price: ReferencePriceSource) -> Self {
+        self.reference_price = Some(reference_price);
         self
     }
 }
