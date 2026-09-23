@@ -4,6 +4,7 @@ pub mod address;
 pub mod base;
 pub mod clock;
 pub mod events;
+mod messages;
 pub mod order;
 pub mod orderbook;
 pub mod signature;

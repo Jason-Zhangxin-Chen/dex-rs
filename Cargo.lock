@@ -3810,10 +3810,6 @@ name = "svd-oms"
 version = "0.1.0"
 
 [[package]]
-name = "svd-posttrade"
-version = "0.1.0"
-
-[[package]]
 name = "svd-pretrade"
 version = "0.1.0"
 
