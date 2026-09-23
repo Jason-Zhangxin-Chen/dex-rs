@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/cache", "crates/codec", "crates/cryptography","crates/net", "crates/primitives", "crates/storage", "crates/svd-oms", "crates/svd-posttrade", "crates/svd-pretrade", "crates/svd-settle", "crates/svd-settle", "crates/svd-sync", "crates/util"]
 
 [workspace.dependencies]
-alloy = "2.4.2"
+alloy = "2.5.0"
 serde = "1.0.229"
 rmp-serde = "1.3.1"
 slab = "0.4.12"
