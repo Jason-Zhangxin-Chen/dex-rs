@@ -8,6 +8,12 @@ use std::convert::TryInto;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signature(pub [u8; 65]);
 
+impl Default for Signature {
+    fn default() -> Self {
+        Self([0u8; 65])
+    }
+}
+
 impl Serialize for Signature {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

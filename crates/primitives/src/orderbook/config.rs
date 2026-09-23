@@ -2,7 +2,6 @@
 
 use crate::base::Symbol;
 use crate::orderbook::risk::ReferencePriceSource;
-use crate::orderbook::statistics::PriceLevelStatistics;
 use crate::orderbook::stp::STPMode;
 use crate::value::{Price, Quantity};
 use serde::{Deserialize, Serialize};

@@ -43,7 +43,7 @@ pub enum PegReferenceType {
 }
 
 /// Total quote-asset computed as `Σ price × quantity` across every transaction.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Quote(pub u128);
 
