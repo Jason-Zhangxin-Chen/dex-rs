@@ -4,10 +4,11 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 [dependencies]
-rustc-hash = {workspace = true}
-slab = {workspace = true, features = ["serde"]}
-litemap = {workspace = true, features = ["serde"]}
+rustc-hash = { workspace = true}
+slab = { workspace = true, features = ["serde"]}
+litemap = { workspace = true, features = ["serde"]}
 serde = { workspace = true, features = ["derive"] }
+alloy = { workspace = true }
 
 util = {version = "0.1.0", path = "../util"}
 cache = {version = "0.1.0", path = "../cache"}
