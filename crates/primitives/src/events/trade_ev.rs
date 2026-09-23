@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 /// Enhanced trade result that includes symbol information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TradeResult {
+pub struct TradeEvent {
     /// The symbol this trade result belongs to
     pub taker_order: Order,
 
