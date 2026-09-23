@@ -4,7 +4,7 @@ use crate::value::{Price, TimestampMs};
 use serde::{Deserialize, Serialize};
 
 /// The statistics of the price level, it helps liquidity distribution analysis.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PriceLevelStatistics {
     /// Price
     price: Price,
@@ -36,7 +36,7 @@ pub struct PriceLevelStatistics {
 }
 
 /// Book statistics aggregated from price levels.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BookStatistics {
     /// Number of orders added.
     orders_added: usize,

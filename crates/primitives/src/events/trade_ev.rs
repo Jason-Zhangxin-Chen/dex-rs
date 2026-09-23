@@ -35,6 +35,56 @@ pub struct TradeEvent {
     pub timestamp: TimestampMs,
 }
 
+impl TradeEvent {
+    /// Creates a new trade event.
+    pub fn new(
+        taker_order: Order,
+        remaining_quantity: Quantity,
+        out_come: MatchOutcome,
+        quote_notional: Quote,
+        trades: Vec<Trade>,
+        timestamp: TimestampMs,
+    ) -> Self {
+        Self { taker_order, remaining_quantity, out_come, quote_notional, trades, timestamp }
+    }
+
+    /// Sets the taker order of the trade.
+    pub fn with_taker_order(mut self, taker_order: Order) -> Self {
+        self.taker_order = taker_order;
+        self
+    }
+
+    /// Sets the remaining quantity of the taker order after matching.
+    pub fn with_remaining_quantity(mut self, remaining_quantity: Quantity) -> Self {
+        self.remaining_quantity = remaining_quantity;
+        self
+    }
+
+    /// Sets the match outcome.
+    pub fn with_out_come(mut self, out_come: MatchOutcome) -> Self {
+        self.out_come = out_come;
+        self
+    }
+
+    /// Sets the total quote-asset notional consumed by this trade.
+    pub fn with_quote_notional(mut self, quote_notional: Quote) -> Self {
+        self.quote_notional = quote_notional;
+        self
+    }
+
+    /// Sets the list of trades that resulted from the match.
+    pub fn with_trades(mut self, trades: Vec<Trade>) -> Self {
+        self.trades = trades;
+        self
+    }
+
+    /// Sets the timestamp when the trade occurred.
+    pub fn with_timestamp(mut self, timestamp: TimestampMs) -> Self {
+        self.timestamp = timestamp;
+        self
+    }
+}
+
 /// Represents a completed trade between two orders.
 ///
 /// All fields are private to enforce immutability after construction.
@@ -49,6 +99,31 @@ pub struct Trade {
 
     /// Quantity traded.
     pub quantity: Quantity,
+}
+
+impl Trade {
+    /// Creates a new trade.
+    pub fn new(maker_order: Order, price: Price, quantity: Quantity) -> Self {
+        Self { maker_order, price, quantity }
+    }
+
+    /// Sets the maker order.
+    pub fn with_maker_order(mut self, maker_order: Order) -> Self {
+        self.maker_order = maker_order;
+        self
+    }
+
+    /// Sets the price at which the trade occurred.
+    pub fn with_price(mut self, price: Price) -> Self {
+        self.price = price;
+        self
+    }
+
+    /// Sets the quantity traded.
+    pub fn with_quantity(mut self, quantity: Quantity) -> Self {
+        self.quantity = quantity;
+        self
+    }
 }
 
 #[repr(u8)]
@@ -79,4 +154,91 @@ pub enum MatchOutcome {
     /// of it), so it was rejected: zero trades, full remaining quantity,
     /// resting queue left untouched.
     Rejected,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::test_utils::sample_order;
+
+    // ---------------------------------------------------------------
+    // Trade
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_trade_constructor() {
+        let maker = sample_order(1);
+        let trade = Trade::new(maker.clone(), Price(100), Quantity(10));
+        assert_eq!(trade.maker_order, maker);
+        assert_eq!(trade.price, Price(100));
+        assert_eq!(trade.quantity, Quantity(10));
+    }
+
+    #[test]
+    fn test_trade_with_setters() {
+        let trade = Trade::new(sample_order(1), Price(1), Quantity(2))
+            .with_maker_order(sample_order(3))
+            .with_price(Price(4))
+            .with_quantity(Quantity(5));
+        assert_eq!(trade.maker_order, sample_order(3));
+        assert_eq!(trade.price, Price(4));
+        assert_eq!(trade.quantity, Quantity(5));
+    }
+
+    // ---------------------------------------------------------------
+    // TradeEvent
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_trade_event_constructor() {
+        let taker = sample_order(1);
+        let maker = sample_order(2);
+        let trade = Trade::new(maker.clone(), Price(100), Quantity(10));
+        let event = TradeEvent::new(
+            taker.clone(),
+            Quantity(0),
+            MatchOutcome::Filled,
+            Quote(1_000),
+            vec![trade.clone()],
+            TimestampMs(42),
+        );
+        assert_eq!(event.taker_order, taker);
+        assert_eq!(event.remaining_quantity, Quantity(0));
+        assert_eq!(event.out_come, MatchOutcome::Filled);
+        assert_eq!(event.quote_notional, Quote(1_000));
+        assert_eq!(event.trades.len(), 1);
+        assert_eq!(event.trades[0].maker_order, maker);
+        assert_eq!(event.trades[0].price, Price(100));
+        assert_eq!(event.trades[0].quantity, Quantity(10));
+        assert_eq!(event.timestamp, TimestampMs(42));
+    }
+
+    #[test]
+    fn test_trade_event_with_setters() {
+        let maker = sample_order(2);
+        let trade = Trade::new(maker.clone(), Price(100), Quantity(10));
+        let event = TradeEvent::new(
+            sample_order(1),
+            Quantity(5),
+            MatchOutcome::PartiallyFilled,
+            Quote(500),
+            vec![],
+            TimestampMs(1),
+        )
+        .with_taker_order(sample_order(3))
+        .with_remaining_quantity(Quantity(1))
+        .with_out_come(MatchOutcome::NotFilled)
+        .with_quote_notional(Quote(0))
+        .with_trades(vec![trade])
+        .with_timestamp(TimestampMs(2));
+        assert_eq!(event.taker_order, sample_order(3));
+        assert_eq!(event.remaining_quantity, Quantity(1));
+        assert_eq!(event.out_come, MatchOutcome::NotFilled);
+        assert_eq!(event.quote_notional, Quote(0));
+        assert_eq!(event.trades.len(), 1);
+        assert_eq!(event.trades[0].maker_order, maker);
+        assert_eq!(event.trades[0].price, Price(100));
+        assert_eq!(event.trades[0].quantity, Quantity(10));
+        assert_eq!(event.timestamp, TimestampMs(2));
+    }
 }
