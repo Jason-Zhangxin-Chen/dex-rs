@@ -3,13 +3,13 @@
 use crate::address::Address;
 use crate::base::{Nonce, Symbol};
 use crate::clock::Clock;
+use crate::events::trade_ev::Trade;
 use crate::order::{OrderIdx, OrderNode};
 use crate::orderbook::config::BookConfig;
 use crate::orderbook::listener::Listeners;
 use crate::orderbook::price_level::PriceLevel;
 use crate::orderbook::risk::RiskState;
 use crate::orderbook::statistics::BookStatistics;
-use crate::trade::Trade;
 use crate::value::Price;
 use cache::object_pool::Cache;
 use litemap::LiteMap;

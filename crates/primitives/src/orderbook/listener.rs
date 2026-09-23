@@ -1,18 +1,16 @@
-use crate::event::PriceLevelChangedEvent;
-use crate::order::Order;
-use crate::orderbook::order_status::OrderStatus;
-use crate::orderbook::statistics::{BookStatistics, PriceLevelStatistics};
-use crate::trade::TradeResult;
+use crate::events::book_state_ev::{PriceLevelChangedEvent, StatisticsEvent};
+use crate::events::order_state_ev::OrderStateEvent;
+use crate::events::trade_ev::TradeEvent;
 
 /// Trade listener push trade event to the settlement services, to the storage infra and to the
 /// external messaging service.
-pub type TradeListener = Box<dyn Fn(&TradeResult)>;
+pub type TradeListener = Box<dyn Fn(&TradeEvent)>;
 /// Price level change event listener push changes of price level to the external system, UI etc...
 pub type PriceLevelChangedListener = Box<dyn Fn(PriceLevelChangedEvent)>;
 /// Order status listener push the latest order state and its status to the external of the core.
-pub type OrderStatusListener = Box<dyn Fn(Order, &OrderStatus)>;
+pub type OrderStatusListener = Box<dyn Fn(OrderStateEvent)>;
 /// Statistics listener push the book and price level statistics to the external system.
-pub type StatisticListener = Box<dyn Fn(BookStatistics, Vec<PriceLevelStatistics>)>;
+pub type StatisticListener = Box<dyn Fn(StatisticsEvent)>;
 
 /// Listeners collect a set of callback closure to notify engine event to external system.
 /// They are none blocking functions.

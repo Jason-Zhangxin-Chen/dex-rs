@@ -1,11 +1,14 @@
 //! Statistics for price level and order book.
 
-use crate::value::TimestampMs;
+use crate::value::{Price, TimestampMs};
 use serde::{Deserialize, Serialize};
 
 /// The statistics of the price level, it helps liquidity distribution analysis.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct PriceLevelStatistics {
+    /// Price
+    price: Price,
+
     /// Number of orders added.
     orders_added: usize,
 
