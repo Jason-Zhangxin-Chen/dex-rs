@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 
 /// New Order event
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NewOrder(Order);
+pub struct NewOrderEvent(Order);
 
-impl NewOrder {
+impl NewOrderEvent {
     /// Creates a new order event.
     pub fn new(order: Order) -> Self {
         Self(order)
@@ -26,7 +26,7 @@ impl NewOrder {
 
 /// Cancel Order event
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CancelOrder {
+pub struct CancelOrderEvent {
     /// The symbol.
     symbol: Symbol,
     /// The order to be canceled.
@@ -41,7 +41,7 @@ pub struct CancelOrder {
     signature: Signature,
 }
 
-impl CancelOrder {
+impl CancelOrderEvent {
     /// Creates a new cancel order event.
     pub fn new(
         symbol: Symbol,
@@ -103,13 +103,13 @@ mod tests {
     #[test]
     fn test_new_order_constructor() {
         let order = sample_order(1);
-        let event = NewOrder::new(order.clone());
+        let event = NewOrderEvent::new(order.clone());
         assert_eq!(event.0, order);
     }
 
     #[test]
     fn test_new_order_with_order() {
-        let event = NewOrder::new(sample_order(1)).with_order(sample_order(2));
+        let event = NewOrderEvent::new(sample_order(1)).with_order(sample_order(2));
         assert_eq!(event.0, sample_order(2));
     }
 
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn test_cancel_order_constructor() {
-        let event = CancelOrder::new(
+        let event = CancelOrderEvent::new(
             Symbol([1u8; 32]),
             Hash32([2u8; 32]),
             Address([3u8; 20]),
@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn test_cancel_order_default() {
-        let event = CancelOrder::default();
+        let event = CancelOrderEvent::default();
         assert_eq!(event.symbol, Symbol::default());
         assert_eq!(event.order_id, Hash32::default());
         assert_eq!(event.user, Address::default());
@@ -148,7 +148,7 @@ mod tests {
 
     #[test]
     fn test_cancel_order_with_setters() {
-        let event = CancelOrder::default()
+        let event = CancelOrderEvent::default()
             .with_symbol(Symbol([1u8; 32]))
             .with_order_id(Hash32([2u8; 32]))
             .with_user(Address([3u8; 20]))
