@@ -2,8 +2,8 @@
 //! # Control plane: pause, resume, kill.
 //! # Topic: Settlement, sharded by symbol between wire protocol's partitions.
 
-use serde::{Deserialize, Serialize};
 use crate::events::control_ev::ControlEvent;
+use serde::{Deserialize, Serialize};
 
 /// MsgPostTrade defines the msgs to be handled by PostTrade services.
 #[derive(Debug, Clone, Serialize, Deserialize)]
