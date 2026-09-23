@@ -9,7 +9,7 @@ use crate::orderbook::config::BookConfig;
 use crate::orderbook::listener::Listeners;
 use crate::orderbook::price_level::PriceLevel;
 use crate::orderbook::risk::RiskState;
-use crate::orderbook::statistics::BookStatistics;
+use crate::orderbook::statistics::{BookStatistics, PriceLevelStatistics};
 use crate::value::Price;
 use cache::object_pool::Cache;
 use litemap::LiteMap;
@@ -94,4 +94,7 @@ pub struct ObjectPools {
     /// is determined by the number of users who are opening trades on the system, we config one
     /// initially capacity, and it grows on runtime.
     pub order_idx_list_pool: Cache<Vec<OrderIdx>>,
+
+    /// Pool of price level statistics.
+    pub price_lvl_statistic_list_pool: Cache<Vec<PriceLevelStatistics>>,
 }

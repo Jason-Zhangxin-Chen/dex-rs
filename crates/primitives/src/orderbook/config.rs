@@ -2,6 +2,7 @@
 
 use crate::base::Symbol;
 use crate::orderbook::risk::ReferencePriceSource;
+use crate::orderbook::statistics::PriceLevelStatistics;
 use crate::orderbook::stp::STPMode;
 use crate::value::{Price, Quantity};
 use serde::{Deserialize, Serialize};
@@ -56,6 +57,12 @@ pub struct BookConfigCold {
     /// Initial capacity of index list.
     pub order_index_list_size: Option<u32>,
 
+    /// Initial capacity of the price level list pool.
+    pub price_level_statistic_list_pool_size: Option<u32>,
+
+    /// Initial capacity of the price level list.
+    pub price_level_statistic_list_size: Option<u32>,
+
     /// Initial capacity of sorted map of price levels.
     pub price_level_map_size: Option<u16>,
 
@@ -85,6 +92,24 @@ impl BookConfigCold {
     /// Sets the capacity of the sorted map of price levels.
     pub fn with_map_price_level_size(mut self, map_price_level_size: u16) -> Self {
         self.price_level_map_size = Some(map_price_level_size);
+        self
+    }
+
+    /// Sets the capacity of the price level list size.
+    pub fn with_price_lvl_statistic_list_size(
+        mut self,
+        price_lvl_statistic_list_size: u32,
+    ) -> Self {
+        self.price_level_statistic_list_size = Some(price_lvl_statistic_list_size);
+        self
+    }
+
+    /// Sets the capacity of the price level list pool size.
+    pub fn with_price_lvl_statistic_list_pool_size(
+        mut self,
+        price_lvl_statistic_list_pool_size: u32,
+    ) -> Self {
+        self.price_level_statistic_list_pool_size = Some(price_lvl_statistic_list_pool_size);
         self
     }
 
@@ -137,7 +162,7 @@ pub struct BookConfigHot {
 
     /// Maximum order size. When set, orders with `total_quantity() > max` are
     /// rejected. `None` disables validation (default).
-    max_order_size: Option<Quantity>,
+    pub max_order_size: Option<Quantity>,
 
     /// Risk config bound to the book.
     pub risk_config: Option<RiskConfig>,
@@ -282,6 +307,8 @@ mod tests {
         assert_eq!(cold.order_index_list_pool_size, None);
         assert_eq!(cold.order_index_list_size, None);
         assert_eq!(cold.trade_list_pool_size, None);
+        assert_eq!(cold.price_level_statistic_list_pool_size, None);
+        assert_eq!(cold.price_level_statistic_list_size, None);
         assert_eq!(cold.trade_list_size, None);
         assert_eq!(cold.symbol, Symbol::default());
     }
@@ -297,6 +324,8 @@ mod tests {
             .with_order_index_list_size(u32::MAX)
             .with_trade_list_size(2_000u32)
             .with_trade_list_pool_size(128u8)
+            .with_price_lvl_statistic_list_pool_size(u32::MAX)
+            .with_price_lvl_statistic_list_size(u32::MAX)
             .with_symbol(Symbol([1u8; 32]));
         assert_eq!(cold.arena_size, Some(1_000));
         assert_eq!(cold.order_index_size, Some(2_000));
@@ -306,6 +335,8 @@ mod tests {
         assert_eq!(cold.order_index_list_size, Some(u32::MAX));
         assert_eq!(cold.trade_list_size, Some(2_000u32));
         assert_eq!(cold.trade_list_pool_size, Some(128u8));
+        assert_eq!(cold.price_level_statistic_list_size, Some(u32::MAX));
+        assert_eq!(cold.price_level_statistic_list_pool_size, Some(u32::MAX));
         assert_eq!(cold.symbol, Symbol([1u8; 32]));
     }
 
