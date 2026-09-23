@@ -23,7 +23,8 @@ pub struct PriceLevelChangedEvent {
 /// Statistic event carries the orderbook statistic metrics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatisticsEvent {
-    /// Price level statistics, this vector is reusable to avoid allocation.
+    /// List of PriceLevelStatistics of the latest book. The vector<PriceLevelStatistics> is pooled
+    /// in the free cache with RAII guard.
     price_level_statistics: Vec<PriceLevelStatistics>,
     /// Book Statistics.
     book_statistics: BookStatistics,
