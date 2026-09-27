@@ -1,0 +1,3 @@
+//! ipc implements different IPC protocols: share memory, unix sock, etc...
+
+pub mod mmap_spsc;
