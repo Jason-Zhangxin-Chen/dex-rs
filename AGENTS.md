@@ -4,35 +4,81 @@ Guidance for AI coding agents (Claude Code, Codex, Cursor, etc.) working in this
 
 ## Project overview
 
-dex-rs is a decentralized exchange with **off-chain execution and on-chain settlement**:
+dex-rs is a decentralized exchange composed of two halves:
 
-- **On-chain protocols** handle margin-account management and settlement management.
-  Current primitives are EVM-compatible (`Address` = `[u8; 20]`, `Signature` = `[u8; 65]`);
-  `alloy` is pinned as workspace dependencies for chain interop.
-- **Off-chain distributed system wired by Redpanda** (Kafka-compatible event bus) composed
-  of five services: `svd-pretrade` (pre-trade risk), `svd-oms` (order matching),
-  `svd-posttrade` (post-trade processing), `svd-settle` (settlement), `svd-sync` (state sync).
-- **`crates/primitives`** is the heart of the workspace: the matching-engine types and core
-  logic that every service consumes.
+- **On-chain protocols** for margin-account management and settlement management,
+  using EVM-compatible address/signature primitives (`alloy` is pinned for chain interop).
+- **An off-chain distributed system** for order execution, wired by low latency IPC queue and NATS streaming protocols
+  made up of seven services:
 
-Status: `primitives` is the only populated crate. The five service binaries and the
-`cache` / `codec` / `net` / `storage` crates are scaffolds; Redpanda topic wiring does not
-exist in code yet — the architecture above is the target design.
+  | Service | Responsibility |
+  | --- | --- |
+  | `svd-pretrade` | Pre-trade risk checks |
+  | `svd-oms-master` | Order matching (order management system) |
+  | `svd-oms-slave` | off the svd-oms-master load by state replication and publishing changes |
+  | `svd-settlement` | Settlement management |
+  | `svd-sync` | On-chain state to svd-storage synchronization  |
+  | `svd-pub-sub` | System state pub/sub services  |
+  | `svd-query` | System state query services  |
+
+## Architecture and design philosophy.
+The design targets to 3 critical properties: Low latency, scalability and recoverability. There is no blocking execution
+on the hot path. That is why the share memory based SPSC and NATS messaging are employed on the hot path, the other wire
+protocols were considered, for example Kafka, Redpanda and Pulsar, as they introduce much more latency with heavy
+execution context, so we eventually decide the current design and architecture.
+
+- **The Architecture**
+
+- **Hot path**
+[User]---(Order/CancelOrder)--->[NGINX]--->[SVD_Pretrade]--->[SVD_OMS_Master]--->[SVD_Settlement]--->[Web3RPCNodes].
+The user's request are routed by symbol as it is explicitly declared in the api path exposed by the SVD_Pretrade, thus
+NGINX route the market's request to the corresponding [SVD_Pretrade], in between the SVDs, there is a file mapped share
+memory SPSC which provides persistence messaging to wire the pipeline of the market, so the SVDs of the same market are
+deployed in the same host for ultra low latency. All the resources required for the computing in this pipeline are
+pre-allocated and reused. The book state tracking load of [SVD_OMS_Master] is moved to [SVD_OMS_Slave] by state
+replication, thus that the Master can focus on the matching and deliver the trade event to [SVD_Settlement] only.
+
+- **Side path**
+[SVD_OMS_Master]---(NATS messages)--->[SVD_OMS_Slave]---(Book State Changes)--->[[Redis_Cluster], [SQL_Cluster],
+[SVD_PubSub]].
+The master pushes change events via the NATS stream with configurable sync/async mode to the slave node, the replication
+introduces the high availability and load sharing of [SVD_OMS_Master] because the [SVD_OMS_Slave] tracks the book state
+changes and publish them into [Redis_Cluster], [SQL_Cluster] and the [SVD_PubSub] cluster. Also the [SVD_OMS_Slave] can
+switch to an [SVD_OMS_Master] when the [SVD_OMS_Master] is in disaster.
+
+- **MarketData PubSub**
+[User]---(websock)--->[NGINX]---(round robin relay)--->[SVD_PubSub]Cluster--->[Redis_Cluster].
+The subscription comes from the [User] end via web socket, [NGINX] forward the HTTP handshake to [SVD_PubSub] cluster by
+round robin, once the session is being created, the subscriptions from the [User] end are processed in one of the
+[SVD_PubSub] instance, the instance then subscribe to [Redis_Cluster] for the corresponding topic asked by the [User].
+
+Both [SVD_OMS_Slave] and [SVD_SYNC] are state change producers, one produces book state changes and the other one
+produces margin position changes synced from on-chain settlement protocol. They push the changes to the [Redis_Cluster],
+with [Redis_Cluster]'s built-in Pub&Sub protocols, the cluster pushes changes to those [SVD_PubSub] instances which
+subscribe to the corresponding topics on demand as the [User] requested.
+
+- **Data Query**
+[User]---(HTTP)--->[NGINX]---(round robin relay)--->[SVD_Query]Cluster--->[Redis_Cluster].
+The data query comes from User via HTTP RPC, NGINX works as a load balancer which forward the requests to [SVD_Query]
+Cluster by round robin. The instance in the cluster fetches data from [Redis_Cluster].
 
 ## Workspace layout
 
-Rust workspace (edition 2024, resolver 2, Apache-2.0). Crates:
-
 | Crate | Role |
 | --- | --- |
-| `crates/primitives` | Core matching-engine types (order model, order book, risk, STP, trades, events) |
-| `crates/util` | Shared helpers (`time::now_ms()` — userspace call, not a syscall) |
-| `crates/cryptography` | Scheme-agnostic crypto traits (`Signer` / `PublicKey` / `Signature` / `PrivateKey` / `CryptoError`) — no concrete impls yet |
-| `crates/codec`, `crates/net`, `crates/storage`, `crates/cache` | Scaffolds (placeholder `add`) |
-| `crates/svd-{pretrade,oms,posttrade,settle,sync}` | Service binaries (scaffolds) |
-
-Workspace deps (import with `workspace = true`): `alloy`, `solana-sdk`, `serde`,
-`rmp-serde` (MessagePack), `slab`, `rustc-hash`.
+| `crates/cache` | common cache libs which place object pool, etc... |
+| `crates/cryptography` | common cryptography libs which place hashing, signature signing and verifications, etc... |
+| `crates/ipc` | common libs which place IPC functions like shared memory SPSC queue, etc... |
+| `crates/net` | common libs which place networking helpers like web socket, https, etc... |
+| `crates/primitives` | Core matching-engine types: order model, order book, risk, STP, trades, events, etc... |
+| `crates/storage` | helpers for redis cluster and SQL cluster I/O. |
+| `crates/svd-oms` | The oms service which runs for different mode: master or slave. |
+| `crates/svd-pretrade` | The pre-trade service for pre-trade risk management. |
+| `crates/svd-pubsub` | The pubsub service for realtime state change publishing. |
+| `crates/svd-settlement` | The settlement service which process the trade events from oms. |
+| `crates/svd-sync` | The sync service which sync the on-chain settlement protocol's state to Redis and SQL cluster. |
+| `crates/svd-query` | The query service which provides data query for user end request. |
+| `crates/util` | Shared helpers |
 
 ## Architecture — the matching-engine core
 
@@ -86,7 +132,7 @@ and load-bearing:
   break cross-service compatibility.
 
 ## Development rules
-- Do not allocate heap memory on the hot path!
+- Do not allocate heap memory or do any blocking calls on the hot path!
 ### Toolchain
 
 `rust-toolchain.toml` pins Rust **1.94.1** (first stable of edition 2024, which every crate
