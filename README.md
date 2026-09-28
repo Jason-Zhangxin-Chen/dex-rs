@@ -31,7 +31,7 @@ execution context, so we eventually decide the current design and architecture.
 
 - **The Architecture**
 
-![Architecture diagram](./doc/architecture.jpg)
+![Architecture diagram](./doc/architecture.png)
 
 - **Hot path**
 [User]---(Order/CancelOrder)--->[NGINX]--->[SVD_Pretrade]--->[SVD_OMS_Master]--->[SVD_Settlement]--->[Web3RPCNodes].
