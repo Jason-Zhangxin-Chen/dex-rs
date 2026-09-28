@@ -3826,7 +3826,15 @@ name = "svd-pretrade"
 version = "0.1.0"
 
 [[package]]
-name = "svd-settle"
+name = "svd-pubsub"
+version = "0.1.0"
+
+[[package]]
+name = "svd-query"
+version = "0.1.0"
+
+[[package]]
+name = "svd-settlement"
 version = "0.1.0"
 
 [[package]]
