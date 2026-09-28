@@ -53,7 +53,6 @@ switch to an [SVD_OMS_Master] when the [SVD_OMS_Master] is in disaster.
 The subscription comes from the [User] end via web socket, [NGINX] forward the HTTP handshake to [SVD_PubSub] cluster by
 round robin, once the session is being created, the subscriptions from the [User] end are processed in one of the
 [SVD_PubSub] instance, the instance then subscribe to [Redis_Cluster] for the corresponding topic asked by the [User].
-
 Both [SVD_OMS_Slave] and [SVD_SYNC] are state change producers, one produces book state changes and the other one
 produces margin position changes synced from on-chain settlement protocol. They push the changes to the [Redis_Cluster],
 with [Redis_Cluster]'s built-in Pub&Sub protocols, the cluster pushes changes to those [SVD_PubSub] instances which
