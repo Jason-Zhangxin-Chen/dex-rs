@@ -63,6 +63,14 @@ subscribe to the corresponding topics on demand as the [User] requested.
 The data query comes from User via HTTP RPC, NGINX works as a load balancer which forward the requests to [SVD_Query]
 Cluster by round robin. The instance in the cluster fetches data from [Redis_Cluster].
 
+- **OMS_Master and OMS_Slave**
+The responsibility of an [SVD_OMS_Master] is that, it executes the user request, and replicate the changes to the
+ [SVD_OMS_Slave], it also publish the trade messages to the downstream [SVD_Settlement] service via share memory SPSC
+ queue. All the other computing are offload to [SVD_OMS_Slave], for example the statistics, the market data publishing
+ over the [Redis_Cluster] and [SQL_Cluster]. The [SVD_OMS_Slave] also manages the snapshot of the book and the NATS
+ message sequence, with this checkpoint and the sync point, it manages the state recovery of a book. A slave can be
+ switched to a master during runtime.
+
 ## Workspace layout
 
 | Crate | Role |

@@ -3,24 +3,28 @@
 use crate::address::Address;
 use crate::base::{Nonce, Symbol};
 use crate::clock::Clock;
-use crate::message::side_path::OrderChange;
+use crate::message::hot_path::OrderMsg;
+use crate::message::side_path::{OrderChange, ReplicationMsg};
 use crate::order::{OrderIdx, OrderNode};
 use crate::orderbook::config::BookConfig;
-use crate::orderbook::listener::Listeners;
+use crate::orderbook::listener::Listener;
 use crate::orderbook::price_level::PriceLevel;
 use crate::orderbook::risk::RiskState;
+use crate::orderbook::statistics::BookStatistics;
 use crate::value::Price;
 use cache::object_pool::Cache;
 use litemap::LiteMap;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use slab::Slab;
-use crate::orderbook::statistics::BookStatistics;
+
+/// Orderbook errors defines the runtime errors of the book.
+pub enum OrderBookErr {}
 
 /// OrderBook
 pub struct OrderBook {
-    /// Pre-allocated object pools to avoid runtime heap allocation.
-    object_pools: ObjectPools,
+    /// Pre-allocated memory pools to avoid runtime heap allocation.
+    memory_pools: MemoryPools,
 
     /// BookConfigs of the orderbook.
     config: BookConfig,
@@ -34,26 +38,43 @@ pub struct OrderBook {
     /// Clock source for ms.
     clock: Box<dyn Clock>,
 
-    /// Listeners push events to external systems, they are not blocking.
-    listeners: Listeners,
+    /// Listeners push book changes to the remote component for state replication.
+    listeners: Listener,
+}
+
+impl OrderBook {
+    /// Execute is ran by OMS_Master to execute the ingress request from user.
+    /// The listener callback will emit change events and trade events for the
+    /// downstream components.
+    pub fn execute(&mut self, input: OrderMsg) -> Result<(), OrderBookErr> {
+        // todo: implement the execution of the book with the input msg: NewOrder or CancelOrder.
+        Ok(())
+    }
+
+    /// Apply is ran by OMS_Slave to apply the deltas replicated from the OMS_Master.
+    /// The listener callback will emit changes to Redis cluster and SQL cluster.
+    pub fn apply(&mut self, replicated: &ReplicationMsg) -> Result<(), OrderBookErr> {
+        // todo: implement the applying of the changes to the book, the statistics are
+        //  also updated during the data applying.
+        Ok(())
+    }
 }
 
 /// OrderBookState stores the runtime state of the book, it should be recoverable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderBookState {
-    /// Symbol of the book, to be snapshot too.
-    /// It is important to check the book recovered from a snapshot has the same symbol
-    /// as the configured one, it prevents miss configuration which will introduce wrong
-    /// task routing in the wire protocols (Kafka / Redpanda).
+    /// Symbol of the book.
     symbol: Symbol,
 
     /// The arena of orders, all live orders.
     arena: Slab<OrderNode>,
 
-    /// The bids price levels, sorted by Price from high to low, pre-allocated with initial capacity.
+    /// The bids price levels, sorted by Price from high to low, pre-allocated with
+    /// initial capacity.
     bids: LiteMap<Price, PriceLevel>,
 
-    /// The asks price levels, sorted by Price from low to high, pre-allocated with initial capacity.
+    /// The asks price levels, sorted by Price from low to high, pre-allocated with
+    /// initial capacity.
     asks: LiteMap<Price, PriceLevel>,
 
     /// Index for an order, use the hot data of an order as key for indexing.
@@ -62,8 +83,9 @@ pub struct OrderBookState {
     /// User orders. The vector<OrderIdx> is pooled in the free cache with RAII guard.
     user_orders: FxHashMap<Address, Vec<OrderIdx>>,
 
-    /// Book statistics.
-    book_statistics: BookStatistics,
+    /// Book statistics. OMS_Master skip this for performance, the statistic task is
+    /// done by OMS_Slave which replicates the book.
+    book_statistics: Option<BookStatistics>,
 
     /// Pre-trade risk state.
     risk_state: RiskState,
@@ -78,9 +100,9 @@ pub struct OrderBookState {
     kill_switch: bool,
 }
 
-/// A set of pre-allocated object pools for the book, it contains a pool of Vec<OrderChange>
-/// which is used for state replication from OMS_Master to OMS_Slave via NATS.
-pub struct ObjectPools {
-    /// Pool of Vec<OrderChange>, it is use for state replication from OMS_Master to OMS_Slave.
+/// A set of pre-allocated memory pools for the book, it contains a pool of Vec<OrderChange>
+/// which is used for state replication.
+pub struct MemoryPools {
+    /// Pool of Vec<OrderChange>, it is use for state replication.
     pub changes_pool: Cache<Vec<OrderChange>>,
 }

@@ -1,7 +1,8 @@
 //! The definition of a price level.
 
 use crate::base::Side;
-use crate::order::{NIL, OrderIdx};
+use crate::message::side_path::OrderChange;
+use crate::order::{NIL, Order, OrderIdx};
 use crate::orderbook::statistics::PriceLevelStatistics;
 use crate::value::{Price, Quantity};
 use serde::{Deserialize, Serialize};
@@ -23,8 +24,9 @@ pub struct PriceLevel {
     /// The Side: Buy or Sell.
     side: Side,
 
-    /// The statistics of the price level.
-    stats: PriceLevelStatistics,
+    /// The statistics of the price level. OMS_Master skip this for performance, the statistic
+    /// task is done by OMS_Slave which replicates the book.
+    stats: Option<PriceLevelStatistics>,
 
     /// The price of the level.
     price: Price,
@@ -37,6 +39,18 @@ pub struct PriceLevel {
 /// one and the OrderQueue which contains this ingesting order:
 /// {tail: NIL, head: ingesting order IDX, len: 1}
 impl PriceLevel {
+    /// execute an order over this level, call by OMS_Master. It generates changes of the level.
+    pub fn execute(&mut self) -> Result<Vec<OrderChange>, PriceLevelError> {
+        // todo: implement this
+        Ok(Vec::new())
+    }
+
+    /// apply changes to the price level, only ran by the OMS_Slave to replicate the state.
+    pub fn apply(&mut self) -> Result<(), PriceLevelError> {
+        // todo: implement this
+        Ok(())
+    }
+
     /// Sets the price of the level.
     pub fn with_price(mut self, price: Price) -> Self {
         self.price = price;
@@ -44,7 +58,7 @@ impl PriceLevel {
     }
 
     /// Sets the stats of the level.
-    pub fn with_stats(mut self, stats: PriceLevelStatistics) -> Self {
+    pub fn with_stats(mut self, stats: Option<PriceLevelStatistics>) -> Self {
         self.stats = stats;
         self
     }
