@@ -3,22 +3,19 @@
 use crate::address::Address;
 use crate::base::{Nonce, Symbol};
 use crate::clock::Clock;
-use crate::events::trade_ev::Trade;
+use crate::message::side_path::OrderChange;
 use crate::order::{OrderIdx, OrderNode};
 use crate::orderbook::config::BookConfig;
 use crate::orderbook::listener::Listeners;
 use crate::orderbook::price_level::PriceLevel;
 use crate::orderbook::risk::RiskState;
-use crate::orderbook::statistics::{BookStatistics, PriceLevelStatistics};
 use crate::value::Price;
 use cache::object_pool::Cache;
 use litemap::LiteMap;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use slab::Slab;
-
-// todo: impl the orderbook internal logics in this file.
-//  it includes, setup of order book, matching logics, state manipulations, and event publishing.
+use crate::orderbook::statistics::BookStatistics;
 
 /// OrderBook
 pub struct OrderBook {
@@ -81,20 +78,9 @@ pub struct OrderBookState {
     kill_switch: bool,
 }
 
-/// A set of pre-allocated object pools for the book, it contains:
-/// # A pool of Vec<Trade> which is used for TradeResult reporting.
-/// # A pool of Vec<OrderIdx> which is used for tracking per user's orders.
+/// A set of pre-allocated object pools for the book, it contains a pool of Vec<OrderChange>
+/// which is used for state replication from OMS_Master to OMS_Slave via NATS.
 pub struct ObjectPools {
-    /// Pool of trade list. Although the core is running within single thread, however the reporting
-    /// is none blocking, thus we need multiple instance of Vec<Trade> for trade event reporting.
-    /// The length of the Vec<Trade> is configurable too.
-    pub trade_list_pool: Cache<Vec<Trade>>,
-    /// Pool of order index list. As the risk config contains max_open_orders_per_account, thus the
-    /// length of this Vec<OrderIdx> should not exceed this value. The capacity of order_idx_list_pool
-    /// is determined by the number of users who are opening trades on the system, we config one
-    /// initially capacity, and it grows on runtime.
-    pub order_idx_list_pool: Cache<Vec<OrderIdx>>,
-
-    /// Pool of price level statistics.
-    pub price_lvl_statistic_list_pool: Cache<Vec<PriceLevelStatistics>>,
+    /// Pool of Vec<OrderChange>, it is use for state replication from OMS_Master to OMS_Slave.
+    pub changes_pool: Cache<Vec<OrderChange>>,
 }

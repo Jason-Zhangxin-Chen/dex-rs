@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Value type representing a price.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Price(pub u64);
 
 impl Price {
@@ -11,8 +11,14 @@ impl Price {
     pub const ZERO: Self = Self(0);
 }
 
+impl Default for Price {
+    fn default() -> Self {
+        Self::ZERO
+    }
+}
+
 /// Quantity type representing a quantity in an order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Quantity(pub u64);
 
 impl Quantity {
@@ -20,13 +26,25 @@ impl Quantity {
     pub const ZERO: Self = Self(0);
 }
 
+impl Default for Quantity {
+    fn default() -> Self {
+        Self::ZERO
+    }
+}
+
 /// TimestampMS representing a TS in millisecond.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimestampMs(pub u64);
 
 impl TimestampMs {
     /// Zero timestamp value.
     pub const ZERO: Self = Self(0);
+}
+
+impl Default for TimestampMs {
+    fn default() -> Self {
+        Self::ZERO
+    }
 }
 
 #[cfg(test)]
