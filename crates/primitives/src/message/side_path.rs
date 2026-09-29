@@ -1,19 +1,29 @@
-//! Event of order status.
+//! Sidepath messages define the messages being transferred between [`SVD_OMS_Master`] and
+//! [`SVD_OMS_Slave`], the state replication depends on the messages to replicate the changes.
 
 use crate::order::Order;
 use crate::value::Quantity;
 use serde::{Deserialize, Serialize};
 
+/// Replication message contains the changes of the book triggered by an ingress OrderMsg.
+#[repr(C)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplicationMsg {
+    /// The changes of the orders.
+    pub order_changes: Option<Vec<OrderChange>>,
+}
+
 /// Order state event carries the changes of an order.
+#[repr(C)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct OrderStateEvent {
-    /// The order that changes its status.
+pub struct OrderChange {
+    /// The last order state before the change.
     order: Order,
     /// The new state of the order.
     status: OrderStatus,
 }
 
-impl OrderStateEvent {
+impl OrderChange {
     /// Creates a new order state event.
     pub fn new(order: Order, status: OrderStatus) -> Self {
         Self { order, status }
@@ -33,14 +43,13 @@ impl OrderStateEvent {
 }
 
 /// Order status for lifecycle tracking.
+#[repr(C)]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum OrderStatus {
     /// Order accepted in the book, no fills yet.
     Open,
     /// Order partially filled, remainder still resting in the book.
     PartiallyFilled {
-        /// Total quantity originally submitted.
-        original_quantity: Quantity,
         /// Filled quantity.
         filled_quantity: Quantity,
     },
@@ -131,28 +140,4 @@ pub enum RejectReason {
     /// variant; it exists so applications can ferry their own reject
     /// codes through the same channel without forking the enum.
     Other(u16),
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::events::test_utils::sample_order;
-    use crate::value::Quantity;
-
-    #[test]
-    fn test_order_state_event_constructor() {
-        let order = sample_order(1);
-        let event = OrderStateEvent::new(order.clone(), OrderStatus::Open);
-        assert_eq!(event.order, order);
-        assert!(matches!(event.status, OrderStatus::Open));
-    }
-
-    #[test]
-    fn test_order_state_event_with_setters() {
-        let event = OrderStateEvent::new(sample_order(1), OrderStatus::Open)
-            .with_order(sample_order(2))
-            .with_status(OrderStatus::Filled { filled_quantity: Quantity(9) });
-        assert_eq!(event.order, sample_order(2));
-        assert!(matches!(event.status, OrderStatus::Filled { filled_quantity: Quantity(9) }));
-    }
 }

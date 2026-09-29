@@ -9,9 +9,10 @@ pub struct Symbol(pub [u8; 32]);
 
 /// Side represents the side of an order.
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum Side {
     /// Buy side (bids)
+    #[default]
     Buy,
 
     /// Sell side (asks)

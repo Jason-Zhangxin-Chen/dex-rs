@@ -12,7 +12,7 @@ pub struct PriceLevelStatistics {
     /// Number of orders added.
     orders_added: usize,
 
-    /// Number of orders removed.
+    /// Number of orders removed, it should include cancelled and expired.
     orders_removed: usize,
 
     /// Number of orders executed.
