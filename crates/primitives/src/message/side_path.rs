@@ -8,10 +8,7 @@ use serde::{Deserialize, Serialize};
 /// Replication message contains the changes of the book triggered by an ingress OrderMsg.
 #[repr(C)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReplicationMsg {
-    /// The changes of the orders.
-    pub order_changes: Option<Vec<OrderChange>>,
-}
+pub struct ReplicationMsg(pub Vec<OrderChange>);
 
 /// Order state event carries the changes of an order.
 #[repr(C)]

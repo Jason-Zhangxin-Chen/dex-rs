@@ -3,11 +3,11 @@
 use crate::address::Address;
 use crate::base::{Nonce, Symbol};
 use crate::clock::Clock;
-use crate::message::hot_path::OrderMsg;
+use crate::message::hot_path::{CancelOrder, OrderMsg, Trade};
 use crate::message::side_path::{OrderChange, ReplicationMsg};
-use crate::order::{OrderIdx, OrderNode};
+use crate::order::{Order, OrderIdx, OrderNode};
 use crate::orderbook::config::BookConfig;
-use crate::orderbook::listener::Listener;
+use crate::orderbook::listener::Listeners;
 use crate::orderbook::price_level::PriceLevel;
 use crate::orderbook::risk::RiskState;
 use crate::orderbook::statistics::BookStatistics;
@@ -39,16 +39,29 @@ pub struct OrderBook {
     clock: Box<dyn Clock>,
 
     /// Listeners push book changes to the remote component for state replication.
-    listeners: Listener,
+    listeners: Listeners,
 }
 
 impl OrderBook {
     /// Execute is ran by OMS_Master to execute the ingress request from user.
     /// The listener callback will emit change events and trade events for the
     /// downstream components.
-    pub fn execute(&mut self, input: OrderMsg) -> Result<(), OrderBookErr> {
-        // todo: implement the execution of the book with the input msg: NewOrder or CancelOrder.
-        Ok(())
+    pub fn execute(&mut self, input: &OrderMsg) -> Result<(), OrderBookErr> {
+        match input {
+            OrderMsg::NewOrder(new) => {
+                let result = self.execute_new_order(&new)?;
+                self.listeners.fanout_replication_msg(&ReplicationMsg(result.0));
+                if result.1.is_some() {
+                    self.listeners.fanout_trade_msg(&result.1.unwrap());
+                }
+                Ok(())
+            }
+            OrderMsg::CancelOrder(cancel) => {
+                let result = self.execute_cancel_order(&cancel)?;
+                self.listeners.fanout_replication_msg(&ReplicationMsg(result));
+                Ok(())
+            }
+        }
     }
 
     /// Apply is ran by OMS_Slave to apply the deltas replicated from the OMS_Master.
@@ -57,6 +70,27 @@ impl OrderBook {
         // todo: implement the applying of the changes to the book, the statistics are
         //  also updated during the data applying.
         Ok(())
+    }
+
+    /// execute_new_order execute the new order, it matches the best price from the opposite side
+    /// price levels one by one until there is no more available cross orders or the quantity is
+    /// exhausted. It calls the PriceLevel's pub method `execute` to match available orders per
+    /// level and returns Vec<OrderChange> of per level, after the task done, it merges the outputs.
+    fn execute_new_order(
+        &mut self,
+        input: &Order,
+    ) -> Result<(Vec<OrderChange>, Option<Vec<Trade>>), OrderBookErr> {
+        Ok((Vec::new(), None))
+    }
+
+    /// execute_cancel_order execute the cancellation an order, it removes the order from the book,
+    /// and pop out it from the corresponding price level. The return contains a Vec<OrderChange>
+    /// which represents the change of the book.
+    fn execute_cancel_order(
+        &mut self,
+        input: &CancelOrder,
+    ) -> Result<Vec<OrderChange>, OrderBookErr> {
+        Ok(Vec::new())
     }
 }
 

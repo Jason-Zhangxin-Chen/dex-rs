@@ -8,9 +8,9 @@ pub type BookListener = Box<dyn Fn(&ReplicationMsg)>;
 /// Trade listener push the trade event to the downstream component, it is run only by OMS_Master.
 pub type TradeListener = Box<dyn Fn(&Vec<Trade>)>;
 
-/// Listener contains a none blocking callback closure to notify book changes to the external system.
+/// Listeners contains none blocking callback closures to notify book changes to the external system.
 #[derive(Default)]
-pub struct Listener {
+pub struct Listeners {
     /// Book state listener, it replicates the changes of the book to remote system.
     /// The listener running by OMS_Master replicates the changes to OMS_Slave via NATS stream,
     /// while the listener running by OMS_Slave replicates the changes to the Redis Cluster.
@@ -21,7 +21,7 @@ pub struct Listener {
     trade_listener: Option<TradeListener>,
 }
 
-impl Listener {
+impl Listeners {
     /// Set the book state listener.
     pub fn with_book_state_listener(mut self, book_listener: BookListener) -> Self {
         self.book_listener = Some(book_listener);
@@ -32,5 +32,15 @@ impl Listener {
     pub fn with_trade_state_listener(mut self, trade_listener: TradeListener) -> Self {
         self.trade_listener = Some(trade_listener);
         self
+    }
+
+    /// Fanout replication messages.
+    pub fn fanout_replication_msg(&self, replication_msg: &ReplicationMsg) {
+        self.book_listener(replication_msg);
+    }
+
+    /// Fanout the trade event messages.
+    pub fn fanout_trade_msg(&self, trades: &Vec<Trade>) {
+        self.trade_listener(trades);
     }
 }
