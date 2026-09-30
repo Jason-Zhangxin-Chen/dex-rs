@@ -47,6 +47,16 @@ impl CancelOrder {
         Self { symbol, order_id, user, nonce, timestamp, signature }
     }
 
+    /// The user who requests the operation.
+    pub fn user(&self) -> Address {
+        self.user
+    }
+
+    /// The nonce of the order to be cancelled.
+    pub fn nonce(&self) -> Nonce {
+        self.nonce
+    }
+
     /// Sets the symbol of the order to be canceled.
     pub fn with_symbol(mut self, symbol: Symbol) -> Self {
         self.symbol = symbol;
@@ -88,7 +98,7 @@ impl CancelOrder {
 /// Trade defines the exchange between two orders, a matching can generate multiple
 /// Trades for an ingress order. The [`SVD_Settlement`] batches it and submit them to
 /// Settlement protocol contract.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Trade {
     /// Taker order, the ingress order.
     pub taker: Order,

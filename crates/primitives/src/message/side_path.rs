@@ -7,12 +7,12 @@ use serde::{Deserialize, Serialize};
 
 /// Replication message contains the changes of the book triggered by an ingress OrderMsg.
 #[repr(C)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplicationMsg(pub Vec<OrderChange>);
 
 /// Order state event carries the changes of an order.
 #[repr(C)]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrderChange {
     /// The last order state before the change.
     order: Order,
@@ -24,6 +24,16 @@ impl OrderChange {
     /// Creates a new order state event.
     pub fn new(order: Order, status: OrderStatus) -> Self {
         Self { order, status }
+    }
+
+    /// The last order state before the change.
+    pub fn order(&self) -> &Order {
+        &self.order
+    }
+
+    /// The new state of the order.
+    pub fn status(&self) -> &OrderStatus {
+        &self.status
     }
 
     /// Sets the order that changes its status.
@@ -41,7 +51,7 @@ impl OrderChange {
 
 /// Order status for lifecycle tracking.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrderStatus {
     /// Order accepted in the book, no fills yet.
     Open,
@@ -137,4 +147,31 @@ pub enum RejectReason {
     /// variant; it exists so applications can ferry their own reject
     /// codes through the same channel without forking the enum.
     Other(u16),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmp_serde::{from_slice, to_vec};
+
+    // ---------------------------------------------------------------
+    // Wire format
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_replication_msg_wire_format_is_transparent() {
+        // ReplicationMsg is a transparent newtype over the change vector: the
+        // pooled listener payload (the bare vector) encodes identically.
+        let changes = Vec::<OrderChange>::new();
+        let bytes = to_vec(&ReplicationMsg(changes.clone())).unwrap();
+        assert_eq!(bytes, to_vec(&changes).unwrap());
+    }
+
+    #[test]
+    fn test_replication_msg_roundtrip() {
+        let msg = ReplicationMsg(Vec::new());
+        let bytes = to_vec(&msg).unwrap();
+        let restored: ReplicationMsg = from_slice(&bytes).unwrap();
+        assert_eq!(msg, restored);
+    }
 }

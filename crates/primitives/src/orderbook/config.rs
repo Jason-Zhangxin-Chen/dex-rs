@@ -62,7 +62,7 @@ pub struct BookConfigCold {
     /// Initial capacity of the price level list.
     pub price_level_statistic_list_size: Option<u32>,
 
-    /// Initial capacity of sorted map of price levels.
+    /// Initial capacity of the sorted bids / asks price level maps.
     pub price_level_map_size: Option<u16>,
 
     /// Initial capacity of cache of trade list pool.

@@ -1,12 +1,52 @@
+use std::ops::{Deref, DerefMut};
+
+use cache::object_pool::CacheGuard;
+
 use crate::message::hot_path::Trade;
-use crate::message::side_path::ReplicationMsg;
+use crate::message::side_path::OrderChange;
+
+/// A state replication message checked out from the book's memory pool. The
+/// listener takes ownership of the payload buffer; it is cleared and returned
+/// to the pool when the message is dropped. A listener that forwards the
+/// message asynchronously moves it into its task, so the buffer lives exactly
+/// as long as the forwarding work.
+///
+/// The payload is the change vector; it encodes identically to
+/// [`crate::message::side_path::ReplicationMsg`] on the wire, because the
+/// message type is a transparent newtype over the vector.
+pub struct PooledReplicationMsg(CacheGuard<Vec<OrderChange>>);
+
+impl PooledReplicationMsg {
+    /// Wraps a pooled change vector into a replication message.
+    pub fn new(changes: CacheGuard<Vec<OrderChange>>) -> Self {
+        Self(changes)
+    }
+}
+
+impl Deref for PooledReplicationMsg {
+    type Target = Vec<OrderChange>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for PooledReplicationMsg {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+/// A trade list checked out from the book's memory pool, owned by the
+/// listener until it is dropped (see [`PooledReplicationMsg`]).
+pub type PooledTrades = CacheGuard<Vec<Trade>>;
 
 /// Book state listener push the changes of the book to the remote components for state replication.
 /// The implementation depends on the mode that the OMS engine running, Master or Slave.
-pub type BookListener = Box<dyn Fn(&ReplicationMsg)>;
+pub type BookListener = Box<dyn Fn(PooledReplicationMsg)>;
 
 /// Trade listener push the trade event to the downstream component, it is run only by OMS_Master.
-pub type TradeListener = Box<dyn Fn(&Vec<Trade>)>;
+pub type TradeListener = Box<dyn Fn(PooledTrades)>;
 
 /// Listeners contains none blocking callback closures to notify book changes to the external system.
 #[derive(Default)]
@@ -34,13 +74,21 @@ impl Listeners {
         self
     }
 
-    /// Fanout replication messages.
-    pub fn fanout_replication_msg(&self, replication_msg: &ReplicationMsg) {
-        self.book_listener(replication_msg);
+    /// Fanout a replication message. The ownership of the pooled buffer moves
+    /// to the listener, which returns it to the pool by dropping it once the
+    /// (possibly asynchronous) fanout work is done. Without a listener the
+    /// message is dropped here and the buffer returns to the pool.
+    pub fn fanout_replication_msg(&self, replication_msg: PooledReplicationMsg) {
+        if let Some(listener) = &self.book_listener {
+            listener(replication_msg);
+        }
     }
 
-    /// Fanout the trade event messages.
-    pub fn fanout_trade_msg(&self, trades: &Vec<Trade>) {
-        self.trade_listener(trades);
+    /// Fanout the trade event messages, with the same ownership contract as
+    /// [`Listeners::fanout_replication_msg`].
+    pub fn fanout_trade_msg(&self, trades: PooledTrades) {
+        if let Some(listener) = &self.trade_listener {
+            listener(trades);
+        }
     }
 }

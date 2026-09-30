@@ -73,6 +73,14 @@ impl<T: Clear> Cache<T> {
         CacheGuard { inner: Arc::clone(&self.inner), item: Some(item) }
     }
 
+    /// Wrap an item constructed outside the pool in a [`CacheGuard`]: the
+    /// item is reset and returned to the pool when the guard is dropped,
+    /// mirroring [`Cache::acquire`]. Nothing is checked out of the pool, so
+    /// wrapping does not touch the available items.
+    pub fn wrap(&self, item: T) -> CacheGuard<T> {
+        CacheGuard { inner: Arc::clone(&self.inner), item: Some(item) }
+    }
+
     /// Resize the pool so that it keeps up to `new_size` objects available.
     ///
     /// * Growing: fresh objects are created using the factory.
@@ -125,11 +133,11 @@ pub struct CacheGuard<T: Clear> {
 }
 
 impl<T: Clear> CacheGuard<T> {
-    /// Consume the guard and take ownership of the object *without* returning
-    /// it to the pool. The content is preserved — [`Clear::clear`] is not
-    /// called. Useful when the object is in a broken state and should not be
-    /// reused.
-    pub fn take(mut self) -> T {
+    /// Take the object out of the guard *without* returning it to the pool.
+    /// The content is preserved — [`Clear::clear`] is not called — and the
+    /// guard is left empty, so its drop no longer returns anything. Useful
+    /// when the object is in a broken state and should not be reused.
+    pub fn take(&mut self) -> T {
         self.item.take().expect("guard already consumed")
     }
 }
@@ -339,7 +347,7 @@ mod tests {
         assert_eq!(cache.available(), 1);
 
         // Remove the last object permanently too.
-        let g2 = cache.acquire();
+        let mut g2 = cache.acquire();
         let _item2 = g2.take();
         assert_eq!(cache.available(), 0);
 
@@ -349,6 +357,26 @@ mod tests {
         drop(_item);
         drop(_item2);
         assert_eq!(live.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn test_wrap_returns_item_to_pool_on_drop() {
+        let (cache, live) = make_cache(1);
+        // Check the pooled item out permanently.
+        let _owned = cache.acquire().take();
+        assert_eq!(cache.available(), 0);
+
+        // A wrapped item returns to the pool when its guard is dropped.
+        {
+            let mut guard = cache.wrap(TestItem::new(Arc::clone(&live)));
+            guard.value = 7;
+            assert_eq!(cache.available(), 0);
+        }
+        assert_eq!(cache.available(), 1);
+        assert_eq!(live.load(Ordering::SeqCst), 2);
+        // The returned item was reset before reuse.
+        let guard = cache.acquire();
+        assert_eq!(guard.value, 0);
     }
 
     #[test]
