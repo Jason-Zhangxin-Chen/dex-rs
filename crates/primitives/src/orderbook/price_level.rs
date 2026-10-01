@@ -24,7 +24,7 @@ pub enum PriceLevelError {}
 /// when the output is dropped.
 pub struct PriceLevelExecution {
     /// Order changes generated at this level: maker fills, STP cancellations
-    /// and lazy time-in-force expiries.
+    /// and lazy time-in-force expires.
     pub changes: CacheGuard<Vec<OrderChange>>,
     /// Trades crossed at this level, all at the level price.
     pub trades: CacheGuard<Vec<Trade>>,
@@ -128,7 +128,7 @@ impl PriceLevel {
 
     /// Removes an order from the queue without matching it (user cancel, mass
     /// cancel). The caller purges the order from the remaining book structures
-    /// afterwards.
+    /// afterward.
     pub fn remove(&mut self, arena: &mut Slab<OrderNode>, idx: OrderIdx) {
         let (visible, hidden) = {
             let node = arena.get(idx as usize).expect("queued order exists in the arena");

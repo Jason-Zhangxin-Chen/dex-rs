@@ -135,31 +135,6 @@ impl OrderBook {
         Ok(())
     }
 
-    /// Test helper mirroring the pooled execution path of [`OrderBook::execute`]:
-    /// returns owned buffers taken out of the pool so tests can inspect them.
-    #[cfg(test)]
-    fn execute_new_order(
-        &mut self,
-        input: &Order,
-    ) -> Result<(Vec<OrderChange>, Option<Vec<Trade>>), OrderBookErr> {
-        let mut changes = self.memory_pools.changes_pool.acquire();
-        let mut trades = self.memory_pools.trades_pool.acquire();
-        self.process_new_order(input, &mut changes, &mut trades)?;
-        let trades = if trades.is_empty() { None } else { Some(trades.take()) };
-        Ok((changes.take(), trades))
-    }
-
-    /// Test helper mirroring the pooled cancellation path of [`OrderBook::execute`].
-    #[cfg(test)]
-    fn execute_cancel_order(
-        &mut self,
-        input: &CancelOrder,
-    ) -> Result<Vec<OrderChange>, OrderBookErr> {
-        let mut changes = self.memory_pools.changes_pool.acquire();
-        self.process_cancel_order(input, &mut changes)?;
-        Ok(changes.take())
-    }
-
     /// process_cancel_order cancels an order: it removes the order from the
     /// book and pops it out of its price level. The change of the book is
     /// appended to the caller's pooled buffer.
@@ -477,23 +452,21 @@ impl OrderBook {
                 break;
             }
 
-            // The best price level of the opposite side that crosses the limit.
-            let price = match taker.hot.side {
-                Side::Buy => self
-                    .state
-                    .asks
-                    .iter()
-                    .find(|(p, _)| limit.is_none_or(|l| p.0 <= l.0))
-                    .map(|(p, _)| *p),
-                Side::Sell => self
-                    .state
-                    .bids
-                    .iter()
-                    .rev()
-                    .find(|(p, _)| limit.is_none_or(|l| p.0 >= l.0))
-                    .map(|(p, _)| *p),
+            // The best price of the opposite side. The maps are sorted, so
+            // the best level is the first one in iteration order; when it
+            // does not cross the limit, no deeper level crosses either.
+            let best = match taker.hot.side {
+                Side::Buy => self.state.asks.iter().next(),
+                Side::Sell => self.state.bids.iter().next_back(),
             };
-            let Some(price) = price else { break };
+            let Some((&price, _)) = best else { break };
+            let crosses = match taker.hot.side {
+                Side::Buy => limit.is_none_or(|l| price.0 <= l.0),
+                Side::Sell => limit.is_none_or(|l| price.0 >= l.0),
+            };
+            if !crosses {
+                break;
+            }
 
             let mut execution = {
                 let levels = match taker.hot.side {
@@ -814,16 +787,47 @@ impl OrderBookState {
     }
 }
 
+impl OrderBook {
+    /// Test helper mirroring the pooled execution path of [`OrderBook::execute`]:
+    /// returns owned buffers taken out of the pool so tests can inspect them.
+    #[cfg(test)]
+    fn execute_new_order(
+        &mut self,
+        input: &Order,
+    ) -> Result<(Vec<OrderChange>, Option<Vec<Trade>>), OrderBookErr> {
+        let mut changes = self.memory_pools.changes_pool.acquire();
+        let mut trades = self.memory_pools.trades_pool.acquire();
+        self.process_new_order(input, &mut changes, &mut trades)?;
+        let trades = if trades.is_empty() { None } else { Some(trades.take()) };
+        Ok((changes.take(), trades))
+    }
+
+    /// Test helper mirroring the pooled cancellation path of [`OrderBook::execute`].
+    #[cfg(test)]
+    fn execute_cancel_order(
+        &mut self,
+        input: &CancelOrder,
+    ) -> Result<Vec<OrderChange>, OrderBookErr> {
+        let mut changes = self.memory_pools.changes_pool.acquire();
+        self.process_cancel_order(input, &mut changes)?;
+        Ok(changes.take())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::base::Hash32;
     use crate::order::{OrderCold, OrderColdCommon, OrderHot};
-    use crate::orderbook::config::{BookConfigHot, RiskConfig};
+    use crate::orderbook::config::{BookConfigCold, BookConfigHot, RiskConfig};
     use crate::orderbook::stp::STPMode;
     use crate::signature::Signature;
     use std::cell::Cell;
+    use std::path::{Path, PathBuf};
     use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
 
     // ---------------------------------------------------------------
     // Helpers
@@ -964,6 +968,86 @@ mod tests {
             change_of(&changes, &sell(2, 2, 100, 30)),
             Some(OrderStatus::PartiallyFilled { filled_quantity: Quantity(10) })
         );
+    }
+
+    #[test]
+    fn test_price_time_priority_sweep() {
+        let mut book = book();
+        // Resting asks: 98 (two makers, time priority), 99, and 101 beyond
+        // the taker's limit.
+        book.execute_new_order(&sell(2, 1, 98, 5)).unwrap();
+        book.execute_new_order(&sell(2, 2, 98, 10)).unwrap();
+        book.execute_new_order(&sell(3, 1, 99, 20)).unwrap();
+        book.execute_new_order(&sell(4, 1, 101, 30)).unwrap();
+        let taker = buy(1, 1, 100, 40);
+        let (changes, trades) = book.execute_new_order(&taker).unwrap();
+
+        let trades = trades.unwrap();
+        assert_eq!(trades.len(), 3);
+        // Price priority: the sweep takes the best prices first, ascending.
+        assert_eq!((trades[0].price, trades[0].traded_quantity), (Price(98), Quantity(5)));
+        assert_eq!(trades[0].maker, sell(2, 1, 98, 5));
+        // Time priority within the 98 level: the earlier order fills first.
+        assert_eq!((trades[1].price, trades[1].traded_quantity), (Price(98), Quantity(10)));
+        assert_eq!(trades[1].maker, sell(2, 2, 98, 10));
+        assert_eq!((trades[2].price, trades[2].traded_quantity), (Price(99), Quantity(20)));
+        assert_eq!(trades[2].maker, sell(3, 1, 99, 20));
+        // The taker's remainder rests; the level beyond the limit is untouched.
+        assert_eq!(
+            change_of(&changes, &taker),
+            Some(OrderStatus::PartiallyFilled { filled_quantity: Quantity(35) })
+        );
+        assert!(book.state.asks.get(&Price(98)).is_none());
+        assert!(book.state.asks.get(&Price(99)).is_none());
+        assert_eq!(book.state.asks.get(&Price(101)).unwrap().visible_quantity(), Quantity(30));
+        assert_eq!(book.state.bids.get(&Price(100)).unwrap().visible_quantity(), Quantity(5));
+    }
+
+    #[test]
+    fn test_replenished_order_loses_time_priority() {
+        let mut book = book();
+        // An iceberg maker rests first, a plain maker second, at the same price.
+        let iceberg = build(
+            2,
+            1,
+            100,
+            10,
+            Side::Sell,
+            TimeInForce::Gtc,
+            OrderKind::Iceberg { hidden_quantity: Quantity(90) },
+        );
+        book.execute_new_order(&iceberg).unwrap();
+        let plain = sell(3, 1, 100, 20);
+        book.execute_new_order(&plain).unwrap();
+
+        let (_, trades) = book.execute_new_order(&buy(1, 1, 100, 15)).unwrap();
+        let trades = trades.unwrap();
+        // The iceberg's first tranche fills first; it then replenishes and
+        // re-queues behind the plain maker, which fills next.
+        assert_eq!(trades[0].maker, iceberg);
+        assert_eq!(trades[0].traded_quantity, Quantity(10));
+        assert_eq!(trades[1].maker, plain);
+        assert_eq!(trades[1].traded_quantity, Quantity(5));
+    }
+
+    #[test]
+    fn test_partially_filled_maker_keeps_time_priority() {
+        let mut book = book();
+        book.execute_new_order(&sell(2, 1, 100, 30)).unwrap();
+        book.execute_new_order(&sell(3, 1, 100, 30)).unwrap();
+
+        // The first taker partially fills the head maker.
+        book.execute_new_order(&buy(1, 1, 100, 10)).unwrap();
+        // The second taker continues with the same head maker first: it has
+        // 20 left, then the second maker fills the rest.
+        let (_, trades) = book.execute_new_order(&buy(1, 2, 100, 40)).unwrap();
+        let trades = trades.unwrap();
+        assert_eq!(trades.len(), 2);
+        assert_eq!(trades[0].maker.hot.user, addr(2));
+        assert_eq!(trades[0].maker.hot.nonce, Nonce(1));
+        assert_eq!(trades[0].traded_quantity, Quantity(20));
+        assert_eq!(trades[1].maker.hot.user, addr(3));
+        assert_eq!(trades[1].traded_quantity, Quantity(20));
     }
 
     // ---------------------------------------------------------------
@@ -1800,5 +1884,422 @@ mod tests {
             restored_book.memory_pools.index_lists_pool.available(),
             restored_book.memory_pools.index_lists_pool.capacity()
         );
+    }
+
+    // ---------------------------------------------------------------
+    // ---------------------------------------------------------------
+    // Single-thread execution benchmark
+    // ---------------------------------------------------------------
+
+    /// The benchmark scenarios: each scenario prepares and persists its own
+    /// seed data set and fires a dedicated order stream.
+    #[derive(Clone, Copy)]
+    enum BenchScenario {
+        Standard,
+        Iceberg,
+        Reserve,
+        Ioc,
+        Mixed,
+    }
+
+    impl BenchScenario {
+        const ALL: [BenchScenario; 5] = [
+            BenchScenario::Standard,
+            BenchScenario::Iceberg,
+            BenchScenario::Reserve,
+            BenchScenario::Ioc,
+            BenchScenario::Mixed,
+        ];
+
+        fn name(self) -> &'static str {
+            match self {
+                BenchScenario::Standard => "standard",
+                BenchScenario::Iceberg => "iceberg",
+                BenchScenario::Reserve => "reserve",
+                BenchScenario::Ioc => "ioc",
+                BenchScenario::Mixed => "mixed",
+            }
+        }
+
+        fn seed_rng(self) -> u64 {
+            match self {
+                BenchScenario::Standard => 0x9E37_79B9_7F4A_7C15,
+                BenchScenario::Iceberg => 0xD1B5_4A32_D192_ED03,
+                BenchScenario::Reserve => 0x4528_21E6_38D0_1377,
+                BenchScenario::Ioc => 0x243F_6A88_85A3_08D3,
+                BenchScenario::Mixed => 0x1319_8A2E_0370_7344,
+            }
+        }
+
+        fn fire_rng(self) -> u64 {
+            self.seed_rng().wrapping_add(0xA409_3822_299F_31D0)
+        }
+
+        /// The order kind of the `index`-th seed order of the scenario.
+        fn seed_kind(self, index: usize, rng: &mut XorShift64) -> OrderKind {
+            match self {
+                BenchScenario::Standard | BenchScenario::Ioc => OrderKind::Standard,
+                BenchScenario::Iceberg => {
+                    OrderKind::Iceberg { hidden_quantity: Quantity(rng.range(20, 200)) }
+                }
+                BenchScenario::Reserve => OrderKind::ReserveOrder {
+                    hidden_quantity: Quantity(200),
+                    replenish_threshold: Quantity(5),
+                    replenish_amount: None,
+                    auto_replenish: true,
+                },
+                BenchScenario::Mixed => match index % 3 {
+                    0 => OrderKind::Standard,
+                    1 => OrderKind::Iceberg { hidden_quantity: Quantity(rng.range(20, 200)) },
+                    _ => OrderKind::ReserveOrder {
+                        hidden_quantity: Quantity(200),
+                        replenish_threshold: Quantity(5),
+                        replenish_amount: None,
+                        auto_replenish: true,
+                    },
+                },
+            }
+        }
+
+        /// The kind and time in force of the `index`-th fired order.
+        fn fire_kind(self, index: u64, rng: &mut XorShift64) -> (OrderKind, TimeInForce) {
+            match self {
+                BenchScenario::Standard => (OrderKind::Standard, TimeInForce::Gtc),
+                BenchScenario::Iceberg => (
+                    OrderKind::Iceberg { hidden_quantity: Quantity(rng.range(0, 100)) },
+                    TimeInForce::Gtc,
+                ),
+                BenchScenario::Reserve => (
+                    OrderKind::ReserveOrder {
+                        hidden_quantity: Quantity(rng.range(0, 100)),
+                        replenish_threshold: Quantity(5),
+                        replenish_amount: None,
+                        auto_replenish: true,
+                    },
+                    TimeInForce::Gtc,
+                ),
+                BenchScenario::Ioc => (OrderKind::Standard, TimeInForce::Ioc),
+                BenchScenario::Mixed => match index % 4 {
+                    0 => (OrderKind::Standard, TimeInForce::Gtc),
+                    1 => (
+                        OrderKind::Iceberg { hidden_quantity: Quantity(rng.range(0, 100)) },
+                        TimeInForce::Gtc,
+                    ),
+                    2 => (
+                        OrderKind::ReserveOrder {
+                            hidden_quantity: Quantity(rng.range(0, 100)),
+                            replenish_threshold: Quantity(5),
+                            replenish_amount: None,
+                            auto_replenish: true,
+                        },
+                        TimeInForce::Gtc,
+                    ),
+                    _ => (OrderKind::Standard, TimeInForce::Ioc),
+                },
+            }
+        }
+    }
+
+    /// Number of resting orders prepared, persisted and injected per scenario.
+    const BENCH_SEED_ORDERS: usize = 20_000;
+    /// Number of untimed orders fired to warm the pools before the statistics.
+    const BENCH_WARMUP_ORDERS: u64 = 500_000;
+    /// Duration of the latency phase and the throughput phase, in seconds.
+    const BENCH_PHASE: Duration = Duration::from_secs(10);
+    /// Root directory of the benchmark artifacts.
+    const BENCH_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/benches");
+
+    /// Minimal deterministic PRNG for the benchmark streams, no external deps.
+    struct XorShift64(u64);
+
+    impl XorShift64 {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        fn range(&mut self, low: u64, high: u64) -> u64 {
+            low + self.next() % (high - low + 1)
+        }
+    }
+
+    /// Pool sizing tuned to the benchmark scale: the containers are
+    /// pre-allocated so the measurement phases never reallocate. The book
+    /// holds ~20k seed orders plus a thin self-balancing layer of resting
+    /// orders, and the per-user lists hold one entry per resting order of
+    /// the ~250 benchmark users.
+    fn bench_config() -> BookConfig {
+        BookConfig::default().with_cold(
+            BookConfigCold::default()
+                .with_arena_size(100_000)
+                .with_order_index_size(100_000)
+                .with_user_order_map_size(256)
+                .with_map_price_level_size(1_024)
+                .with_order_index_list_size(65_536)
+                .with_order_index_list_pool_size(256)
+                .with_trade_list_size(32)
+                .with_trade_list_pool_size(128),
+        )
+    }
+
+    /// Generates the deterministic resting orders of a scenario: bids below
+    /// 10_000, asks above, so the seed book does not cross itself.
+    fn generate_seed_orders(scenario: BenchScenario) -> Vec<Order> {
+        let mut rng = XorShift64(scenario.seed_rng());
+        let mut orders = Vec::with_capacity(BENCH_SEED_ORDERS);
+        for nonce in 0..BENCH_SEED_ORDERS {
+            let (side, price) = if nonce % 2 == 0 {
+                (Side::Sell, rng.range(10_001, 10_200))
+            } else {
+                (Side::Buy, rng.range(9_800, 9_999))
+            };
+            orders.push(build(
+                rng.range(1, 250) as u8,
+                nonce as u64 + 1,
+                price,
+                rng.range(1, 100),
+                side,
+                TimeInForce::Gtc,
+                scenario.seed_kind(nonce, &mut rng),
+            ));
+        }
+        orders
+    }
+
+    /// Loads the persisted seed orders of the scenario, generating and
+    /// persisting them on the first run, so repeated runs inject the
+    /// identical book.
+    fn load_or_generate_seed_orders(scenario: BenchScenario) -> Vec<Order> {
+        let path = Path::new(BENCH_DIR).join(format!("data/{}_seed.bin", scenario.name()));
+        if path.exists() {
+            let bytes = std::fs::read(&path).expect("read persisted seed orders");
+            let orders: Vec<Order> = rmp_serde::from_slice(&bytes).expect("decode seed orders");
+            assert_eq!(orders.len(), BENCH_SEED_ORDERS);
+            return orders;
+        }
+        let orders = generate_seed_orders(scenario);
+        std::fs::create_dir_all(path.parent().expect("bench data dir"))
+            .expect("create bench data dir");
+        std::fs::write(&path, rmp_serde::to_vec(&orders).expect("encode seed orders"))
+            .expect("persist seed orders");
+        orders
+    }
+
+    /// Builds the `fired`-th order of the scenario's fire stream. The stream
+    /// alternates buys just above and sells just below the 10_000 boundary,
+    /// so the two sides keep consuming each other's resting orders and the
+    /// book stays at a steady size for the whole measurement.
+    fn build_fire_order(scenario: BenchScenario, rng: &mut XorShift64, fired: u64) -> Order {
+        let buy = fired.is_multiple_of(2);
+        let (side, price) = if buy {
+            (Side::Buy, 10_000 + rng.range(0, 10))
+        } else {
+            (Side::Sell, 10_000 - rng.range(0, 10))
+        };
+        let (kind, time_in_force) = scenario.fire_kind(fired, rng);
+        build(
+            rng.range(1, 250) as u8,
+            BENCH_SEED_ORDERS as u64 + fired + 1,
+            price,
+            rng.range(1, 50),
+            side,
+            time_in_force,
+            kind,
+        )
+    }
+
+    /// Nearest-rank percentile over a sorted slice of nanosecond latencies.
+    fn percentile(sorted: &[u64], quantile: f64) -> u64 {
+        let rank = (sorted.len() as f64 * quantile).ceil() as usize;
+        sorted[rank.saturating_sub(1)]
+    }
+
+    /// Latency histogram buckets over a sorted slice of nanoseconds.
+    fn latency_histogram(latencies: &[u64]) -> Vec<(String, usize)> {
+        let mut buckets = Vec::new();
+        let mut start = 0;
+        for &upper in &[1u64, 2, 4, 8, 16, 32, 64] {
+            let end = latencies.partition_point(|&ns| ns < upper * 1_000);
+            let label =
+                if upper == 1 { "< 1".to_string() } else { format!("{} - {upper}", upper / 2) };
+            buckets.push((label, end - start));
+            start = end;
+        }
+        buckets.push(("≥ 64".to_string(), latencies.len() - start));
+        buckets
+    }
+
+    /// The measurements of one benchmark scenario.
+    struct ScenarioReport {
+        scenario: BenchScenario,
+        latency_orders: u64,
+        trades: usize,
+        resting_at_end: usize,
+        latency_secs: f64,
+        throughput: f64,
+        mean_us: f64,
+        p50_us: f64,
+        p90_us: f64,
+        p99_us: f64,
+        max_us: f64,
+        histogram: Vec<(String, usize)>,
+    }
+
+    /// Runs one scenario: injects the persisted seed data into a book with
+    /// tuned pools, warms the memory, measures per-order latencies for
+    /// [`BENCH_PHASE`], then measures the batch throughput for [`BENCH_PHASE`].
+    fn run_scenario(scenario: BenchScenario) -> ScenarioReport {
+        // 1. Prepare and persist the seed data set of the scenario.
+        let seed_orders = load_or_generate_seed_orders(scenario);
+
+        // 2. Inject the persisted data into a book with tuned pools.
+        let mut book = OrderBook::new(bench_config());
+        for order in &seed_orders {
+            book.execute(&OrderMsg::NewOrder(*order)).expect("seed order executes");
+        }
+        assert_eq!(book.state.index.len(), BENCH_SEED_ORDERS);
+
+        // Count the trades of the measurement phases.
+        let trades_fired = Arc::new(AtomicUsize::new(0));
+        let trades_counter = Arc::clone(&trades_fired);
+        let mut book = book.with_listeners(Listeners::default().with_trade_state_listener(
+            Box::new(move |trades| {
+                trades_counter.fetch_add(trades.len(), Ordering::Relaxed);
+            }),
+        ));
+
+        // Warmup: fire untimed orders so the pools, the arena and the price
+        // levels reach their steady state before the statistics are taken.
+        let mut rng = XorShift64(scenario.fire_rng());
+        let mut fired = 0u64;
+        for _ in 0..BENCH_WARMUP_ORDERS {
+            let order = build_fire_order(scenario, &mut rng, fired);
+            book.execute(&OrderMsg::NewOrder(order)).expect("warmup order executes");
+            fired += 1;
+        }
+
+        // 3. Latency phase: per-order timings until the phase budget elapses.
+        let mut latencies: Vec<u64> = Vec::with_capacity(20_000_000);
+        let phase_start = Instant::now();
+        while phase_start.elapsed() < BENCH_PHASE {
+            let order = build_fire_order(scenario, &mut rng, fired);
+            let start = Instant::now();
+            book.execute(&OrderMsg::NewOrder(order)).expect("order executes");
+            latencies.push(start.elapsed().as_nanos() as u64);
+            fired += 1;
+        }
+        let latency_secs = phase_start.elapsed().as_secs_f64();
+        let latency_orders = latencies.len() as u64;
+        assert!(latency_orders > 0, "latency phase fired no orders");
+
+        // Throughput phase: no per-order timings, only the batch duration.
+        let mut throughput_orders = 0u64;
+        let phase_start = Instant::now();
+        while phase_start.elapsed() < BENCH_PHASE {
+            let order = build_fire_order(scenario, &mut rng, fired);
+            book.execute(&OrderMsg::NewOrder(order)).expect("order executes");
+            throughput_orders += 1;
+            fired += 1;
+        }
+        let throughput = throughput_orders as f64 / phase_start.elapsed().as_secs_f64();
+
+        // Sanity: the stream really traded.
+        let trades = trades_fired.load(Ordering::Relaxed);
+        assert!(trades > 0, "scenario produced no trades");
+
+        // 4. Percentiles and the report data.
+        latencies.sort_unstable();
+        let micros = |ns: u64| ns as f64 / 1_000.0;
+        let mean_us = micros(latencies.iter().sum::<u64>() / latencies.len() as u64);
+        let p50_us = micros(percentile(&latencies, 0.50));
+        let p90_us = micros(percentile(&latencies, 0.90));
+        let p99_us = micros(percentile(&latencies, 0.99));
+        let max_us = micros(*latencies.last().expect("latencies are not empty"));
+        let resting_at_end = book.state.index.len();
+
+        ScenarioReport {
+            scenario,
+            latency_orders,
+            trades,
+            resting_at_end,
+            latency_secs,
+            throughput,
+            mean_us,
+            p50_us,
+            p90_us,
+            p99_us,
+            max_us,
+            histogram: latency_histogram(&latencies),
+        }
+    }
+
+    /// Writes the combined markdown benchmark report and returns its path.
+    fn write_bench_report(reports: &[ScenarioReport]) -> PathBuf {
+        let path = Path::new(BENCH_DIR).join("reports/book_bench_report.md");
+        std::fs::create_dir_all(path.parent().expect("bench report dir"))
+            .expect("create report dir");
+
+        let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+        let mut report = String::new();
+        report.push_str("# OrderBook execution benchmark (single thread)\n\n");
+        report.push_str("## Configuration\n\n");
+        report.push_str("| metric | value |\n|---|---|\n");
+        report.push_str(&format!("| generated at | {} ms epoch |\n", util::time::now_ms()));
+        report.push_str(&format!("| build profile | {profile} |\n"));
+        report.push_str(&format!("| seed orders per scenario | {} |\n", BENCH_SEED_ORDERS));
+        report.push_str(&format!("| warmup orders per scenario | {} |\n", BENCH_WARMUP_ORDERS));
+        report.push_str(&format!("| phase duration | {} s |\n", BENCH_PHASE.as_secs()));
+        report.push_str("| pool tuning | arena 100k, index 100k, user map 256, price levels 1k, index lists 65k, trade lists 32 |\n");
+        report.push_str("\n## Summary\n\n");
+        report.push_str(
+            "| scenario | orders (latency phase) | p50 | p90 | p99 | mean | throughput |\n",
+        );
+        report.push_str("|---|---|---|---|---|---|---|\n");
+        for r in reports {
+            report.push_str(&format!(
+                "| {} | {} | {:.2} µs | {:.2} µs | {:.2} µs | {:.2} µs | {:.0} orders/s |\n",
+                r.scenario.name(),
+                r.latency_orders,
+                r.p50_us,
+                r.p90_us,
+                r.p99_us,
+                r.mean_us,
+                r.throughput,
+            ));
+        }
+        for r in reports {
+            report.push_str(&format!("\n## Scenario: {}\n\n", r.scenario.name()));
+            report.push_str("| metric | value |\n|---|---|\n");
+            report.push_str(&format!("| orders fired (latency phase) | {} |\n", r.latency_orders));
+            report.push_str(&format!("| trades generated | {} |\n", r.trades));
+            report.push_str(&format!("| resting orders at end | {} |\n", r.resting_at_end));
+            report.push_str(&format!("| latency phase duration | {:.3} s |\n", r.latency_secs));
+            report.push_str(&format!("| mean | {:.2} µs |\n", r.mean_us));
+            report.push_str(&format!("| p50 | {:.2} µs |\n", r.p50_us));
+            report.push_str(&format!("| p90 | {:.2} µs |\n", r.p90_us));
+            report.push_str(&format!("| p99 | {:.2} µs |\n", r.p99_us));
+            report.push_str(&format!("| max | {:.2} µs |\n", r.max_us));
+            report.push_str(&format!("| throughput | {:.0} orders/s |\n", r.throughput));
+            report.push_str("\n| bucket (µs) | count |\n|---|---|\n");
+            for (label, count) in &r.histogram {
+                report.push_str(&format!("| {label} | {count} |\n"));
+            }
+        }
+
+        std::fs::write(&path, &report).expect("write benchmark report");
+        path
+    }
+
+    #[test]
+    #[ignore = "single-thread benchmark: cargo test --release -p primitives book_benchmark -- --ignored --nocapture"]
+    fn book_benchmark() {
+        let reports: Vec<ScenarioReport> =
+            BenchScenario::ALL.iter().copied().map(run_scenario).collect();
+        let report_path = write_bench_report(&reports);
+        println!("benchmark report written to {}", report_path.display());
     }
 }
