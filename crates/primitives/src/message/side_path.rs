@@ -2,13 +2,28 @@
 //! [`SVD_OMS_Slave`], the state replication depends on the messages to replicate the changes.
 
 use crate::order::Order;
-use crate::value::Quantity;
+use crate::value::{Price, Quantity};
 use serde::{Deserialize, Serialize};
 
-/// Replication message contains the changes of the book triggered by an ingress OrderMsg.
+/// Replication message contains the changes of the book triggered by an
+/// ingress OrderMsg and the last trade price of the execution. The last trade
+/// price is `None` when the execution produced no trades; a `Some` price also
+/// carries the has-traded state (the flag is true once any execution traded).
 #[repr(C)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReplicationMsg(pub Vec<OrderChange>);
+pub struct ReplicationMsg {
+    /// The order changes of the execution.
+    pub changes: Vec<OrderChange>,
+    /// The price of the last trade of the execution, if any.
+    pub last_trade_price: Option<Price>,
+}
+
+impl ReplicationMsg {
+    /// Creates a new replication message.
+    pub fn new(changes: Vec<OrderChange>, last_trade_price: Option<Price>) -> Self {
+        Self { changes, last_trade_price }
+    }
+}
 
 /// Order state event carries the changes of an order.
 #[repr(C)]
@@ -77,6 +92,20 @@ pub enum OrderStatus {
         /// Reason.
         reason: RejectReason,
     },
+}
+
+impl OrderStatus {
+    /// Whether the status is terminal: the order is off the book and never
+    /// appears in the change stream again. The replication invariant is that
+    /// every removed order carries a terminal change, and vice versa.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            OrderStatus::Filled { .. }
+                | OrderStatus::Canceled { .. }
+                | OrderStatus::Rejected { .. }
+        )
+    }
 }
 
 /// Reason for order cancellation.
@@ -159,19 +188,19 @@ mod tests {
     // ---------------------------------------------------------------
 
     #[test]
-    fn test_replication_msg_wire_format_is_transparent() {
-        // ReplicationMsg is a transparent newtype over the change vector: the
-        // pooled listener payload (the bare vector) encodes identically.
-        let changes = Vec::<OrderChange>::new();
-        let bytes = to_vec(&ReplicationMsg(changes.clone())).unwrap();
-        assert_eq!(bytes, to_vec(&changes).unwrap());
-    }
-
-    #[test]
     fn test_replication_msg_roundtrip() {
-        let msg = ReplicationMsg(Vec::new());
+        let msg = ReplicationMsg::new(Vec::new(), None);
         let bytes = to_vec(&msg).unwrap();
         let restored: ReplicationMsg = from_slice(&bytes).unwrap();
         assert_eq!(msg, restored);
+    }
+
+    #[test]
+    fn test_replication_msg_last_trade_price_roundtrip() {
+        let msg = ReplicationMsg::new(Vec::new(), Some(Price(42)));
+        let bytes = to_vec(&msg).unwrap();
+        let restored: ReplicationMsg = from_slice(&bytes).unwrap();
+        assert_eq!(msg, restored);
+        assert_eq!(restored.last_trade_price, Some(Price(42)));
     }
 }
