@@ -106,6 +106,27 @@ cargo deny check                   # license / advisory / source audit
 
 Run a single test with `cargo test -p primitives <name>`.
 
+## Benchmarks
+
+The matching engine ships a single-thread execution benchmark that measures the
+end-to-end `OrderBook::execute()` hot path across five scenarios (standard,
+iceberg, reserve, IOC, mixed). Full design, methodology and the complete report
+live in [`crates/primitives/benches/README.md`](crates/primitives/benches/README.md).
+
+Latest release-build results (i7-8665U, commit `ef7f8e1`):
+
+| scenario | p50 | p90 | p99 | throughput |
+| --- | --- | --- | --- | --- |
+| standard | 0.36 µs | 0.94 µs | 1.45 µs | 2.12M orders/s |
+| iceberg | 0.75 µs | 4.58 µs | 9.81 µs | 538k orders/s |
+| reserve | 0.68 µs | 5.16 µs | 6.80 µs | 560k orders/s |
+| ioc | 0.20 µs | 0.21 µs | 0.29 µs | 4.59M orders/s |
+| mixed | 0.47 µs | 2.55 µs | 6.37 µs | 948k orders/s |
+
+```bash
+cargo test --release -p primitives book_benchmark -- --ignored --nocapture
+```
+
 ## Development
 
 - **CI** (`.github/workflows/ci.yml`) gates every PR on build + tests, clippy with

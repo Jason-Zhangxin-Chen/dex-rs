@@ -24,3 +24,7 @@ target
 # Added by cargo
 
 /target
+
+# Benchmark artifacts
+crates/primitives/benches/data/
+crates/primitives/benches/reports/
