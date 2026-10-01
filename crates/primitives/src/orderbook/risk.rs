@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 /// per-order entry map, and a one-shot warning latch for the
 /// "no reference price available" code path. All public operations
 /// are no-ops when `config` is `None`.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RiskState {
     /// RiskState contains the risk config for risk handling.
     risk_config: RiskConfig,
@@ -34,7 +34,7 @@ pub struct RiskState {
 /// order is acceptable and does not exceed the configured limit by
 /// more than a single race window. Strict accuracy is enforced by
 /// snapshot rebuild.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RiskCounters {
     /// Number of resting orders this account currently has on the book.
     open_count: u64,
@@ -47,7 +47,7 @@ pub struct RiskCounters {
 ///
 /// One entry per order admitted into the resting book. Used on cancel
 /// and fill to compute the deltas applied to per-account counters.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct RiskEntry {
     account: Address,
     price: Price,

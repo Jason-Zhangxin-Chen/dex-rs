@@ -1,9 +1,11 @@
 use std::ops::{Deref, DerefMut};
 
-use cache::object_pool::CacheGuard;
+use cache::object_pool::{Cache, CacheGuard};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::message::hot_path::Trade;
-use crate::message::side_path::OrderChange;
+use crate::message::side_path::{OrderChange, ReplicationMsg};
+use crate::value::Price;
 
 /// A state replication message checked out from the book's memory pool. The
 /// listener takes ownership of the payload buffer; it is cleared and returned
@@ -11,15 +13,28 @@ use crate::message::side_path::OrderChange;
 /// message asynchronously moves it into its task, so the buffer lives exactly
 /// as long as the forwarding work.
 ///
-/// The payload is the change vector; it encodes identically to
-/// [`crate::message::side_path::ReplicationMsg`] on the wire, because the
-/// message type is a transparent newtype over the vector.
-pub struct PooledReplicationMsg(CacheGuard<Vec<OrderChange>>);
+/// The message serializes and deserializes identically to
+/// [`crate::message::side_path::ReplicationMsg`] on the wire (the pooled
+/// change buffer stands in for the owned vector), so the NATS stream between
+/// the master and the slave carries one message shape in both directions. A
+/// message deserialized from the wire wraps a detached buffer that is freed
+/// on drop — the wire decode allocates the vector either way.
+pub struct PooledReplicationMsg {
+    /// The pooled change buffer.
+    changes: CacheGuard<Vec<OrderChange>>,
+    /// The price of the last trade of the execution, if any.
+    last_trade_price: Option<Price>,
+}
 
 impl PooledReplicationMsg {
     /// Wraps a pooled change vector into a replication message.
-    pub fn new(changes: CacheGuard<Vec<OrderChange>>) -> Self {
-        Self(changes)
+    pub fn new(changes: CacheGuard<Vec<OrderChange>>, last_trade_price: Option<Price>) -> Self {
+        Self { changes, last_trade_price }
+    }
+
+    /// The price of the last trade of the execution, if any.
+    pub fn last_trade_price(&self) -> Option<Price> {
+        self.last_trade_price
     }
 }
 
@@ -27,13 +42,43 @@ impl Deref for PooledReplicationMsg {
     type Target = Vec<OrderChange>;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.changes
     }
 }
 
 impl DerefMut for PooledReplicationMsg {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+        &mut self.changes
+    }
+}
+
+impl Serialize for PooledReplicationMsg {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // The wire shape of the owned replication message: the same field
+        // names, the pooled buffer encoding as the vector.
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("ReplicationMsg", 2)?;
+        state.serialize_field("changes", &**self.changes)?;
+        state.serialize_field("last_trade_price", &self.last_trade_price)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for PooledReplicationMsg {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Decode the wire shape of the owned replication message, then wrap
+        // the change vector in a detached guard: the drain pool has capacity
+        // 0, so dropping the message frees the buffer (the wire decode
+        // allocates the vector either way).
+        let msg = ReplicationMsg::deserialize(deserializer)?;
+        let drain = Cache::new(0, Vec::new);
+        Ok(PooledReplicationMsg::new(drain.wrap(msg.changes), msg.last_trade_price))
     }
 }
 

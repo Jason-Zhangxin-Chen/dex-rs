@@ -73,6 +73,31 @@ The responsibility of an [SVD_OMS_Master] is that, it executes the user request,
  message sequence, with this checkpoint and the sync point, it manages the state recovery of a book. A slave can be
  switched to a master during runtime.
 
+## Replication
+
+The OMS master executes the ingress orders and replicates **order change**
+messages to the OMS slave over the NATS stream; the slave never executes an
+order, it applies the deltas to rebuild the book state exactly.
+
+- **The change stream is the complete protocol.** Every fill and every removal
+  is encoded by an `OrderChange` carrying the order as it was before the
+  change, its new status, and the quantity filled. Removed orders carry a
+  terminal status (`Filled` / `Canceled`), so the removes need no separate
+  replication; the invariant is enforced at runtime (`debug_assert` in the
+  sweep) and covered by the replication tests.
+- **Execution outputs are replicated too.** Each `ReplicationMsg` carries the
+  execution's last trade price (`None` when it did not trade), which replays
+  `last_trade_price` and the has-traded state on the slave — a slave promoted
+  to master in disaster owns everything the engine needs.
+- **Statistics.** The slave maintains the book and price level statistics
+  while applying; the master skips them for performance.
+- **Recovery.** The slave checkpoints a book snapshot plus the NATS message
+  sequence and recovers by snapshot + delta replay.
+
+The protocol contract, the apply dispatch table, and the deterministic replay
+requirements are documented in [`doc/replication.md`](doc/replication.md); the
+implementation is `OrderBook::apply` in `crates/primitives`.
+
 ## Workspace layout
 
 | Crate | Role |

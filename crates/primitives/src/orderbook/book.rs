@@ -4,16 +4,14 @@ use crate::address::Address;
 use crate::base::{Nonce, PegReferenceType, Side, Symbol};
 use crate::clock::{Clock, MonotonicClock};
 use crate::message::hot_path::{CancelOrder, OrderMsg, Trade};
-use crate::message::side_path::{
-    CancelReason, OrderChange, OrderStatus, RejectReason, ReplicationMsg,
-};
+use crate::message::side_path::{CancelReason, OrderChange, OrderStatus, RejectReason};
 use crate::order::{DEFAULT_RESERVE_REPLENISH_AMOUNT, Order, OrderIdx, OrderKind, OrderNode};
 use crate::orderbook::config::BookConfig;
 use crate::orderbook::listener::{Listeners, PooledReplicationMsg};
 use crate::orderbook::pooled::{MemoryPools, PooledIndexList};
 use crate::orderbook::price_level::{PriceLevel, order_expired};
 use crate::orderbook::risk::RiskState;
-use crate::orderbook::statistics::BookStatistics;
+use crate::orderbook::statistics::{BookStatistics, PriceLevelStatistics};
 use crate::time_in_force::TimeInForce;
 use crate::value::{Price, Quantity, TimestampMs};
 use litemap::LiteMap;
@@ -111,28 +109,221 @@ impl OrderBook {
             OrderMsg::NewOrder(new) => {
                 let mut changes = self.memory_pools.changes_pool.acquire();
                 let mut trades = self.memory_pools.trades_pool.acquire();
-                self.process_new_order(new, &mut changes, &mut trades)?;
+                let last_trade = self.process_new_order(new, &mut changes, &mut trades)?;
                 if !trades.is_empty() {
                     self.listeners.fanout_trade_msg(trades);
                 }
-                self.listeners.fanout_replication_msg(PooledReplicationMsg::new(changes));
+                self.listeners
+                    .fanout_replication_msg(PooledReplicationMsg::new(changes, last_trade));
                 Ok(())
             }
             OrderMsg::CancelOrder(cancel) => {
                 let mut changes = self.memory_pools.changes_pool.acquire();
                 self.process_cancel_order(cancel, &mut changes)?;
-                self.listeners.fanout_replication_msg(PooledReplicationMsg::new(changes));
+                // A cancellation never trades.
+                self.listeners.fanout_replication_msg(PooledReplicationMsg::new(changes, None));
                 Ok(())
             }
         }
     }
 
     /// Apply is ran by OMS_Slave to apply the deltas replicated from the OMS_Master.
-    /// The listener callback will emit changes to Redis cluster and SQL cluster.
-    pub fn apply(&mut self, _replicated: &ReplicationMsg) -> Result<(), OrderBookErr> {
-        // todo: implement the applying of the changes to the book, the statistics are
-        //  also updated during the data applying.
+    ///
+    /// The order change stream is the complete replication protocol: it encodes
+    /// not only the fills but also every removal from the book. Each change
+    /// carries the order as it was *before* the change, its new status, and the
+    /// quantity filled by the event. The master dispatches it by whether the
+    /// order rests in the book (index lookup on `(user, nonce)`):
+    ///
+    /// | change status | resting (maker) | not resting (taker) |
+    /// | --- | --- | --- |
+    /// | `Open` | impossible | rest the order |
+    /// | `PartiallyFilled { filled }` | deduct `filled` from the maker and replay the replenishment | rest with the remainder, replaying the sweep's replenishment |
+    /// | `Filled { filled }` | remove the order | nothing rests |
+    /// | `Canceled { .. }` | remove the order | nothing rests |
+    /// | `Rejected { .. }` | impossible | the order never entered the book |
+    ///
+    /// The remove is fully determined by the terminal (`Filled` / `Canceled`)
+    /// status: the identity comes from the snapshot's `(user, nonce)`, the
+    /// price level deltas from the snapshot's visible/hidden quantities, and
+    /// the reason from the status itself. The book's arena links and level
+    /// totals are rebuilt deterministically on the slave, mirroring the
+    /// master's rules (queue positions, replenishment), so master and slave
+    /// states converge exactly.
+    ///
+    /// The slave also maintains the book and price level statistics here (the
+    /// master skips them for performance). The message's last trade price is
+    /// replayed into the book state: a `Some` price updates the last trade
+    /// price and carries the has-traded state, so a slave promoted to master
+    /// owns the execution outputs it needs.
+    pub fn apply(&mut self, replicated: &PooledReplicationMsg) -> Result<(), OrderBookErr> {
+        let now = self.clock.now_millis();
+        for change in replicated.iter() {
+            self.apply_change(change, now);
+        }
+        // Replay the execution output: the last trade price also carries the
+        // has-traded state (true once any execution traded).
+        if let Some(price) = replicated.last_trade_price() {
+            self.state.last_trade_price = Some(price);
+            self.state.has_traded = true;
+        }
         Ok(())
+    }
+
+    /// Applies one replicated order change to the book.
+    fn apply_change(&mut self, change: &OrderChange, now: TimestampMs) {
+        let order = *change.order();
+        let user = order.hot.user;
+        let nonce = order.hot.nonce;
+        let resting = self.state.index.contains_key(&(user, nonce));
+        match *change.status() {
+            OrderStatus::Open => {
+                debug_assert!(!resting, "an Open change is only emitted for a fresh taker");
+                self.rest_order(&order);
+                self.stats_record_added();
+            }
+            OrderStatus::PartiallyFilled { filled_quantity } => {
+                if resting {
+                    // A maker fill: deduct and replay the replenishment.
+                    self.apply_maker_fill(&order, filled_quantity, now);
+                } else {
+                    // A taker that rests: replay the sweep to reconstruct the
+                    // remainder from the submitted snapshot and the fills.
+                    let remainder = reconstruct_taker_remainder(&order, filled_quantity);
+                    self.rest_order(&remainder);
+                    self.stats_record_added();
+                    self.stats_record_executed(filled_quantity, order.hot.price);
+                }
+            }
+            OrderStatus::Filled { filled_quantity } => {
+                if resting {
+                    self.remove_resting_order(user, nonce);
+                    self.stats_record_removed();
+                    self.stats_record_executed(filled_quantity, order.hot.price);
+                    self.level_stats_executed(&order, filled_quantity, now);
+                } else {
+                    // A fully filled taker never rests.
+                    self.stats_record_executed(filled_quantity, order.hot.price);
+                }
+            }
+            OrderStatus::Canceled { filled_quantity, .. } => {
+                if resting {
+                    self.remove_resting_order(user, nonce);
+                    self.stats_record_removed();
+                    if filled_quantity.0 > 0 {
+                        self.stats_record_executed(filled_quantity, order.hot.price);
+                    }
+                } else if filled_quantity.0 > 0 {
+                    // A taker cancelled with partial fills kept.
+                    self.stats_record_executed(filled_quantity, order.hot.price);
+                }
+            }
+            OrderStatus::Rejected { .. } => {
+                // A rejected order never entered the book.
+            }
+        }
+    }
+
+    /// Replays a maker fill on the slave: the resting maker's visible quantity
+    /// is reduced and the iceberg / reserve replenishment rules are replayed,
+    /// mirroring the master's maker settlement exactly.
+    fn apply_maker_fill(&mut self, maker: &Order, filled: Quantity, now: TimestampMs) {
+        let idx = *self
+            .state
+            .index
+            .get(&(maker.hot.user, maker.hot.nonce))
+            .expect("a resting maker exists in the index");
+        let price = maker.hot.price;
+        {
+            let levels = match maker.hot.side {
+                Side::Buy => &mut self.state.bids,
+                Side::Sell => &mut self.state.asks,
+            };
+            let level = levels.get_mut(&price).expect("a resting maker has a price level");
+            level.apply_fill(&mut self.state.arena, idx, filled);
+            level.stats_record_executed(filled.0 as usize, price.0.saturating_mul(filled.0), now);
+        }
+        self.stats_record_executed(filled, price);
+    }
+
+    /// Records an execution in the price level statistics of the change's
+    /// order; a no-op when the level is gone or the statistics are disabled.
+    fn level_stats_executed(&mut self, order: &Order, filled: Quantity, now: TimestampMs) {
+        let levels = match order.hot.side {
+            Side::Buy => &mut self.state.bids,
+            Side::Sell => &mut self.state.asks,
+        };
+        if let Some(level) = levels.get_mut(&order.hot.price) {
+            level.stats_record_executed(
+                filled.0 as usize,
+                order.hot.price.0.saturating_mul(filled.0),
+                now,
+            );
+        }
+    }
+
+    /// Records an order added to the book statistics; a no-op when the
+    /// statistics are disabled (OMS master).
+    fn stats_record_added(&mut self) {
+        if let Some(stats) = &mut self.state.book_statistics {
+            stats.record_added();
+        }
+    }
+
+    /// Records an order removed from the book statistics; a no-op when the
+    /// statistics are disabled (OMS master).
+    fn stats_record_removed(&mut self) {
+        if let Some(stats) = &mut self.state.book_statistics {
+            stats.record_removed();
+        }
+    }
+
+    /// Records an execution in the book statistics; a no-op when the
+    /// statistics are disabled (OMS master).
+    fn stats_record_executed(&mut self, quantity: Quantity, price: Price) {
+        if let Some(stats) = &mut self.state.book_statistics {
+            stats.record_executed(quantity.0 as usize, price.0.saturating_mul(quantity.0));
+        }
+    }
+
+    /// Enables the statistics collection of the state. The OMS slave runs
+    /// with the statistics on so that [`OrderBook::apply`] maintains them,
+    /// while the OMS master skips them for performance.
+    pub fn enable_statistics(&mut self) {
+        self.state.book_statistics = Some(BookStatistics::default());
+    }
+
+    /// Removes a resting order from the book: unlinks it from its price level
+    /// (dropping the level when it empties) and purges it from the arena, the
+    /// index, the user order map and the risk state. Returns the order as it
+    /// was before the removal. Used by the cancel path and by the slave's
+    /// applying of replicated removes.
+    fn remove_resting_order(&mut self, user: Address, nonce: Nonce) -> Option<Order> {
+        let idx = *self.state.index.get(&(user, nonce))?;
+        let (order, side, price) = {
+            let node =
+                self.state.arena.get(idx as usize).expect("indexed order exists in the arena");
+            (Order::from(node.clone()), node.hot.side, node.hot.price)
+        };
+        let level_empty = {
+            let levels = match side {
+                Side::Buy => &mut self.state.bids,
+                Side::Sell => &mut self.state.asks,
+            };
+            let level = levels.get_mut(&price).expect("a resting order has a price level");
+            level.remove(&mut self.state.arena, idx);
+            level.stats_record_removed();
+            level.is_empty()
+        };
+        if level_empty {
+            let levels = match side {
+                Side::Buy => &mut self.state.bids,
+                Side::Sell => &mut self.state.asks,
+            };
+            levels.remove(&price);
+        }
+        self.purge_order(idx);
+        Some(order)
     }
 
     /// process_cancel_order cancels an order: it removes the order from the
@@ -146,30 +337,7 @@ impl OrderBook {
         // The index key is the (address, nonce) tuple; a cancellation of an
         // unknown order is a silent no-op. The order_id of the request is not
         // verified against the resting order for now.
-        let key = (input.user(), input.nonce());
-        if let Some(&idx) = self.state.index.get(&key) {
-            let (order, side, price) = {
-                let node =
-                    self.state.arena.get(idx as usize).expect("indexed order exists in the arena");
-                (Order::from(node.clone()), node.hot.side, node.hot.price)
-            };
-            let level_empty = {
-                let levels = match side {
-                    Side::Buy => &mut self.state.bids,
-                    Side::Sell => &mut self.state.asks,
-                };
-                let level = levels.get_mut(&price).expect("a resting order has a price level");
-                level.remove(&mut self.state.arena, idx);
-                level.is_empty()
-            };
-            if level_empty {
-                let levels = match side {
-                    Side::Buy => &mut self.state.bids,
-                    Side::Sell => &mut self.state.asks,
-                };
-                levels.remove(&price);
-            }
-            self.purge_order(idx);
+        if let Some(order) = self.remove_resting_order(input.user(), input.nonce()) {
             // The engine does not track the cumulative filled quantity of a
             // resting order, so zero is reported here.
             changes.push(OrderChange::new(
@@ -190,25 +358,25 @@ impl OrderBook {
         input: &Order,
         changes: &mut Vec<OrderChange>,
         trades: &mut Vec<Trade>,
-    ) -> Result<(), OrderBookErr> {
+    ) -> Result<Option<Price>, OrderBookErr> {
         let now = self.clock.now_millis();
 
         // The operational kill switch blocks every new order.
         if self.state.kill_switch {
             changes.push(rejected(*input, RejectReason::KillSwitchActive));
-            return Ok(());
+            return Ok(None);
         }
 
         // The (address, nonce) tuple identifies an order, duplicates are rejected.
         if self.state.index.contains_key(&(input.hot.user, input.hot.nonce)) {
             changes.push(rejected(*input, RejectReason::DuplicateOrderId));
-            return Ok(());
+            return Ok(None);
         }
 
         // Price and quantity validation against the market config.
         if let Some(reason) = self.validate_order(input) {
             changes.push(rejected(*input, reason));
-            return Ok(());
+            return Ok(None);
         }
 
         // A GTD order that already expired never enters the book.
@@ -220,7 +388,7 @@ impl OrderBook {
                     reason: CancelReason::TimeInForceExpired,
                 },
             ));
-            return Ok(());
+            return Ok(None);
         }
 
         // The effective limit price: `None` for a market-to-limit order,
@@ -229,27 +397,27 @@ impl OrderBook {
             Ok(limit) => limit,
             Err(reason) => {
                 changes.push(rejected(*input, reason));
-                return Ok(());
+                return Ok(None);
             }
         };
 
         // Pre-trade risk checks.
         if let Some(reason) = self.check_risk(input, limit) {
             changes.push(rejected(*input, reason));
-            return Ok(());
+            return Ok(None);
         }
 
         // A post-only order never takes liquidity.
         if matches!(input.cold.kind, OrderKind::PostOnly) {
             self.process_post_only(input, changes);
-            return Ok(());
+            return Ok(None);
         }
 
         // A fill-or-kill order is all-or-nothing: the available depth is
         // checked before the first trade happens.
         if input.hot.time_in_force == TimeInForce::Fok && !self.is_fillable(input, limit, now) {
             changes.push(rejected(*input, RejectReason::InsufficientLiquidity));
-            return Ok(());
+            return Ok(None);
         }
 
         // The matching sweep.
@@ -259,9 +427,10 @@ impl OrderBook {
         if let Some(price) = limit {
             taker.hot.price = price;
         }
-        let (filled, killed) = self.sweep(&mut taker, input, limit, now, changes, trades);
+        let (filled, killed, last_trade) =
+            self.sweep(&mut taker, input, limit, now, changes, trades);
         self.dispose_taker(input, &taker, filled, killed, changes);
-        Ok(())
+        Ok(last_trade)
     }
 
     /// Validates the order against the market config: quantity, tick size,
@@ -436,8 +605,9 @@ impl OrderBook {
         now: TimestampMs,
         changes: &mut Vec<OrderChange>,
         trades: &mut Vec<Trade>,
-    ) -> (Quantity, bool) {
+    ) -> (Quantity, bool, Option<Price>) {
         let mut killed = false;
+        let mut last_trade = None;
         // The initial visible quantity is the tranche size an iceberg taker
         // replenishes with.
         let peak = original.hot.quantity;
@@ -489,7 +659,16 @@ impl OrderBook {
             if !execution.trades.is_empty() {
                 self.state.last_trade_price = Some(price);
                 self.state.has_traded = true;
+                last_trade = Some(price);
             }
+            // The change stream fully encodes the removes: every removed
+            // order has a terminal change (Filled / Canceled), which is how
+            // the OMS slave replicates the removes.
+            debug_assert_eq!(
+                execution.removed.len(),
+                execution.changes.iter().filter(|c| c.status().is_terminal()).count(),
+                "the change stream must encode every removed order"
+            );
             // Merge the level buffers into the message buffers; the level
             // buffers return to their pools when `execution` drops.
             changes.append(&mut execution.changes);
@@ -519,7 +698,7 @@ impl OrderBook {
         }
 
         let remaining = taker.total_quantity();
-        (Quantity(initial_total.0 - remaining.0), killed)
+        (Quantity(initial_total.0 - remaining.0), killed, last_trade)
     }
 
     /// Replenishes the visible tranche of an iceberg / reserve taker between
@@ -652,14 +831,24 @@ impl OrderBook {
                 Side::Sell => &mut self.state.asks,
             };
             match levels.get_mut(&order.hot.price) {
-                Some(level) => level.append(&mut self.state.arena, idx, visible, hidden),
+                Some(level) => {
+                    level.append(&mut self.state.arena, idx, visible, hidden);
+                    level.stats_record_added();
+                }
                 None => {
+                    // The level statistics are maintained by the OMS slave
+                    // only; the master creates the level without them.
+                    let stats = if self.state.book_statistics.is_some() {
+                        Some(PriceLevelStatistics::new(order.hot.price, self.clock.now_millis()))
+                    } else {
+                        None
+                    };
                     levels.insert(
                         order.hot.price,
                         PriceLevel::new(
                             order.hot.price,
                             order.hot.side,
-                            None,
+                            stats,
                             idx,
                             visible,
                             hidden,
@@ -703,6 +892,100 @@ impl OrderBook {
 /// Builds a rejected order change.
 fn rejected(order: Order, reason: RejectReason) -> OrderChange {
     OrderChange::new(order, OrderStatus::Rejected { reason })
+}
+
+/// Reconstructs the resting remainder of a taker from its submitted snapshot
+/// and the quantity filled by its sweep, replaying the sweep's replenishment
+/// deterministically: an iceberg replenishes its tranches, an
+/// auto-replenishing reserve tops up to its threshold, a non-auto reserve
+/// discards its hidden remainder. The slave uses it to rest a taker from the
+/// change stream, which carries only the snapshot and the total filled.
+fn reconstruct_taker_remainder(snapshot: &Order, filled: Quantity) -> Order {
+    let mut resting = *snapshot;
+    let mut consumed = filled.0;
+    let peak = snapshot.hot.quantity;
+    while consumed > 0 {
+        if resting.hot.quantity.0 == 0 {
+            match resting.cold.kind {
+                OrderKind::Iceberg { hidden_quantity } => {
+                    let draw = hidden_quantity.0.min(peak.0);
+                    if draw == 0 {
+                        break;
+                    }
+                    resting.hot.quantity = Quantity(draw);
+                    resting.set_hidden_quantity(Quantity(hidden_quantity.0 - draw));
+                }
+                OrderKind::ReserveOrder {
+                    hidden_quantity,
+                    auto_replenish: true,
+                    replenish_threshold,
+                    replenish_amount,
+                } => {
+                    let threshold =
+                        if replenish_threshold.0 == 0 { Quantity(1) } else { replenish_threshold };
+                    let amount =
+                        replenish_amount.map_or(DEFAULT_RESERVE_REPLENISH_AMOUNT, |a| a.get());
+                    let mut hidden = hidden_quantity;
+                    let mut visible = 0u64;
+                    while visible < threshold.0 && hidden.0 > 0 {
+                        let draw = hidden.0.min(amount);
+                        visible += draw;
+                        hidden.0 -= draw;
+                    }
+                    resting.hot.quantity = Quantity(visible);
+                    resting.set_hidden_quantity(hidden);
+                    if visible == 0 {
+                        break;
+                    }
+                }
+                OrderKind::ReserveOrder { auto_replenish: false, .. } => {
+                    // A non-auto reserve never replenishes: once the visible
+                    // tranche is consumed the hidden remainder is discarded.
+                    resting.set_hidden_quantity(Quantity::ZERO);
+                    break;
+                }
+                _ => break,
+            }
+        }
+        let take = consumed.min(resting.hot.quantity.0);
+        resting.hot.quantity.0 -= take;
+        consumed -= take;
+    }
+    // The master replenishes after every level execution, including the last
+    // one, so a taker never rests with an exhausted visible tranche while
+    // hidden quantity remains.
+    if resting.hot.quantity.0 == 0 {
+        match resting.cold.kind {
+            OrderKind::Iceberg { hidden_quantity } => {
+                let draw = hidden_quantity.0.min(peak.0);
+                if draw > 0 {
+                    resting.hot.quantity = Quantity(draw);
+                    resting.set_hidden_quantity(Quantity(hidden_quantity.0 - draw));
+                }
+            }
+            OrderKind::ReserveOrder {
+                hidden_quantity,
+                auto_replenish: true,
+                replenish_threshold,
+                replenish_amount,
+            } => {
+                let threshold =
+                    if replenish_threshold.0 == 0 { Quantity(1) } else { replenish_threshold };
+                let amount = replenish_amount.map_or(DEFAULT_RESERVE_REPLENISH_AMOUNT, |a| a.get());
+                let mut hidden = hidden_quantity;
+                let mut visible = 0u64;
+                while visible < threshold.0 && hidden.0 > 0 {
+                    let draw = hidden.0.min(amount);
+                    visible += draw;
+                    hidden.0 -= draw;
+                }
+                resting.hot.quantity = Quantity(visible);
+                resting.set_hidden_quantity(hidden);
+            }
+            _ => {}
+        }
+    }
+    resting
 }
 
 /// OrderBookState stores the runtime state of the book, it should be recoverable.
@@ -818,11 +1101,12 @@ impl OrderBook {
 mod tests {
     use super::*;
     use crate::base::Hash32;
+    use crate::message::side_path::ReplicationMsg;
     use crate::order::{OrderCold, OrderColdCommon, OrderHot};
     use crate::orderbook::config::{BookConfigCold, BookConfigHot, RiskConfig};
     use crate::orderbook::stp::STPMode;
     use crate::signature::Signature;
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
     use std::sync::Arc;
@@ -1887,6 +2171,270 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
+    // Replication (OMS master -> OMS slave)
+    // ---------------------------------------------------------------
+
+    /// Builds a master / slave pair: the master captures the replicated
+    /// change stream of every execution in a shared buffer.
+    fn replication_pair() -> (OrderBook, OrderBook, Rc<RefCell<Vec<ReplicationMsg>>>) {
+        let captured = Rc::new(RefCell::new(Vec::new()));
+        let capture = Rc::clone(&captured);
+        let master = book().with_listeners(Listeners::default().with_book_state_listener(
+            Box::new(move |msg| {
+                capture.borrow_mut().push(ReplicationMsg::new(
+                    msg.iter().cloned().collect(),
+                    msg.last_trade_price(),
+                ));
+            }),
+        ));
+        (master, book(), captured)
+    }
+
+    /// Executes one message on the master and applies the replicated
+    /// messages to the slave.
+    fn replicate(
+        master: &mut OrderBook,
+        slave: &mut OrderBook,
+        captured: &RefCell<Vec<ReplicationMsg>>,
+        msg: &OrderMsg,
+    ) {
+        master.execute(msg).expect("master executes");
+        let messages = std::mem::take(&mut *captured.borrow_mut());
+        for message in &messages {
+            // Wrap the decoded message into a pooled buffer of the slave,
+            // mirroring the slave-side NATS decode; the buffer returns to the
+            // slave's pool when the apply is done.
+            let pooled = PooledReplicationMsg::new(
+                slave.memory_pools.changes_pool.wrap(message.changes.clone()),
+                message.last_trade_price,
+            );
+            slave.apply(&pooled).expect("slave applies");
+        }
+    }
+
+    /// Asserts that the slave's book state equals the master's, down to the
+    /// arena links and the replicated execution outputs.
+    fn assert_book_eq(master: &OrderBookState, slave: &OrderBookState) {
+        assert_eq!(master.symbol, slave.symbol);
+        assert!(
+            master
+                .arena
+                .iter()
+                .map(|(key, node)| (key, node.clone()))
+                .eq(slave.arena.iter().map(|(key, node)| (key, node.clone())))
+        );
+        assert_eq!(master.bids, slave.bids);
+        assert_eq!(master.asks, slave.asks);
+        assert_eq!(master.index, slave.index);
+        assert_eq!(master.user_orders.len(), slave.user_orders.len());
+        for (user, orders) in &master.user_orders {
+            let slave_orders = slave.user_orders.get(user).expect("slave user order list");
+            assert_eq!(&**orders, &**slave_orders);
+        }
+        assert_eq!(master.risk_state, slave.risk_state);
+        assert_eq!(master.last_trade_price, slave.last_trade_price);
+        assert_eq!(master.has_traded, slave.has_traded);
+        assert_eq!(master.kill_switch, slave.kill_switch);
+        assert_eq!(master.book_statistics, slave.book_statistics);
+    }
+
+    #[test]
+    fn test_pooled_message_wire_format_matches_replication_msg() {
+        // The pooled fanout message encodes identically to the owned
+        // replication message the slave decodes: the listener can serialize
+        // the pooled buffer directly.
+        let book = book();
+        let changes = book.memory_pools.changes_pool.acquire();
+        let pooled = PooledReplicationMsg::new(changes, Some(Price(42)));
+        let owned = ReplicationMsg::new(pooled.iter().cloned().collect(), Some(Price(42)));
+        assert_eq!(rmp_serde::to_vec(&pooled).unwrap(), rmp_serde::to_vec(&owned).unwrap());
+    }
+
+    #[test]
+    fn test_pooled_message_wire_roundtrip() {
+        // The NATS wire roundtrip of the pooled message: the master encodes
+        // the pooled buffer, the slave decodes it back into the pooled type.
+        let book = book();
+        let changes = book.memory_pools.changes_pool.acquire();
+        let pooled = PooledReplicationMsg::new(changes, Some(Price(42)));
+        let bytes = rmp_serde::to_vec(&pooled).unwrap();
+        let restored: PooledReplicationMsg = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(
+            restored.iter().cloned().collect::<Vec<_>>(),
+            pooled.iter().cloned().collect::<Vec<_>>()
+        );
+        assert_eq!(restored.last_trade_price(), Some(Price(42)));
+
+        // A message without a trade roundtrips too.
+        let changes = book.memory_pools.changes_pool.acquire();
+        let pooled = PooledReplicationMsg::new(changes, None);
+        let bytes = rmp_serde::to_vec(&pooled).unwrap();
+        let restored: PooledReplicationMsg = rmp_serde::from_slice(&bytes).unwrap();
+        assert!(restored.is_empty());
+        assert_eq!(restored.last_trade_price(), None);
+    }
+
+    #[test]
+    fn test_replication_reconstructs_the_book() {
+        // One configuration for both books: the slave is an independent book
+        // with the identical config, rebuilt purely from the replicated
+        // messages.
+        let config = BookConfig::default()
+            .with_hot(BookConfigHot::default().with_stp_mode(STPMode::CancelBoth));
+        let captured = Rc::new(RefCell::new(Vec::new()));
+        let capture = Rc::clone(&captured);
+        let mut master = OrderBook::new(config.clone()).with_listeners(
+            Listeners::default().with_book_state_listener(Box::new(move |msg| {
+                capture.borrow_mut().push(ReplicationMsg::new(
+                    msg.iter().cloned().collect(),
+                    msg.last_trade_price(),
+                ));
+            })),
+        );
+        let mut slave = OrderBook::new(config);
+        assert_eq!(master.config, slave.config);
+
+        let steps = [
+            OrderMsg::NewOrder(sell(2, 2, 100, 40)),
+            OrderMsg::NewOrder(sell(2, 3, 101, 30)),
+            // Partial fill: the taker rests 10 at 100.
+            OrderMsg::NewOrder(buy(1, 1, 100, 80)),
+            // Iceberg maker and an iceberg taker sweeping it.
+            OrderMsg::NewOrder(build(
+                2,
+                4,
+                100,
+                20,
+                Side::Sell,
+                TimeInForce::Gtc,
+                OrderKind::Iceberg { hidden_quantity: Quantity(20) },
+            )),
+            OrderMsg::NewOrder(build(
+                1,
+                2,
+                100,
+                60,
+                Side::Buy,
+                TimeInForce::Gtc,
+                OrderKind::Iceberg { hidden_quantity: Quantity(40) },
+            )),
+            // Auto-replenishing reserve maker and a fill below its threshold.
+            OrderMsg::NewOrder(build(
+                3,
+                1,
+                100,
+                10,
+                Side::Sell,
+                TimeInForce::Gtc,
+                OrderKind::ReserveOrder {
+                    hidden_quantity: Quantity(100),
+                    replenish_threshold: Quantity(5),
+                    replenish_amount: None,
+                    auto_replenish: true,
+                },
+            )),
+            OrderMsg::NewOrder(buy(1, 3, 100, 7)),
+            // IOC: fills what it can and cancels the remainder.
+            OrderMsg::NewOrder(build(
+                1,
+                4,
+                100,
+                5,
+                Side::Buy,
+                TimeInForce::Ioc,
+                OrderKind::Standard,
+            )),
+            // Rejected admissions leave no book footprint.
+            OrderMsg::NewOrder(build(
+                1,
+                5,
+                100,
+                10,
+                Side::Buy,
+                TimeInForce::Gtc,
+                OrderKind::PostOnly,
+            )),
+            OrderMsg::NewOrder(build(
+                1,
+                6,
+                100,
+                999,
+                Side::Buy,
+                TimeInForce::Fok,
+                OrderKind::Standard,
+            )),
+            // STP CancelBoth: a same-user self-trade kills taker and maker.
+            OrderMsg::NewOrder(sell(1, 7, 100, 10)),
+            OrderMsg::NewOrder(buy(1, 8, 100, 10)),
+            // Cancel the resting taker from the third step.
+            OrderMsg::CancelOrder(CancelOrder::new(
+                Symbol([0; 32]),
+                Hash32([0; 32]),
+                addr(1),
+                Nonce(1),
+                TimestampMs(0),
+                Signature::default(),
+            )),
+        ];
+        for msg in &steps {
+            replicate(&mut master, &mut slave, &captured, msg);
+        }
+        assert_book_eq(&master.state, &slave.state);
+        // The replicated last trade price covers the execution outputs.
+        assert_eq!(master.state.last_trade_price, Some(Price(100)));
+        assert_eq!(slave.state.last_trade_price, Some(Price(100)));
+        assert!(slave.state.has_traded);
+    }
+
+    #[test]
+    fn test_replication_stream_encodes_removes() {
+        let mut book = book();
+        book.execute_new_order(&sell(2, 2, 100, 40)).unwrap();
+        let (changes, trades) = book.execute_new_order(&buy(1, 1, 100, 50)).unwrap();
+        assert!(trades.is_some());
+        // One maker was removed by the fill; its terminal change is the only
+        // terminal change in the stream, the resting taker's change is not
+        // terminal.
+        let terminal: Vec<&OrderChange> =
+            changes.iter().filter(|c| c.status().is_terminal()).collect();
+        assert_eq!(terminal.len(), 1);
+        assert!(matches!(terminal[0].status(), OrderStatus::Filled { .. }));
+        assert!(matches!(
+            changes.last().expect("the taker change is last").status(),
+            OrderStatus::PartiallyFilled { .. }
+        ));
+    }
+
+    #[test]
+    fn test_slave_statistics_are_maintained() {
+        let (mut master, mut slave, captured) = replication_pair();
+        slave.enable_statistics();
+        replicate(&mut master, &mut slave, &captured, &OrderMsg::NewOrder(sell(2, 2, 100, 40)));
+        replicate(&mut master, &mut slave, &captured, &OrderMsg::NewOrder(buy(1, 1, 100, 50)));
+        replicate(
+            &mut master,
+            &mut slave,
+            &captured,
+            &OrderMsg::CancelOrder(CancelOrder::new(
+                Symbol([0; 32]),
+                Hash32([0; 32]),
+                addr(1),
+                Nonce(1),
+                TimestampMs(0),
+                Signature::default(),
+            )),
+        );
+        let stats = slave.state.book_statistics.as_ref().expect("statistics enabled");
+        // The sell and the resting taker were added; the maker was filled
+        // and the taker cancelled, both removed; maker and taker executed
+        // 40 units each.
+        assert_eq!(stats.orders_added(), 2);
+        assert_eq!(stats.orders_removed(), 2);
+        assert_eq!(stats.orders_executed(), 2);
+        assert_eq!(stats.quantity_executed(), 80);
+        assert_eq!(stats.value_executed(), 8_000);
+    }
+
     // ---------------------------------------------------------------
     // Single-thread execution benchmark
     // ---------------------------------------------------------------

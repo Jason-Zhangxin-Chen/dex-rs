@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// BookConfig owns the config data of the book.
 #[repr(C)]
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BookConfig {
     /// hot configs to be loaded during runtime.
     pub hot: BookConfigHot,
@@ -33,7 +33,7 @@ impl BookConfig {
 
 /// BookConfigCold owns the cold configs of the order book.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BookConfigCold {
     /// Market Symbol for the book.
     pub symbol: Symbol,
@@ -145,7 +145,7 @@ impl BookConfigCold {
 
 /// BookConfigHot owns the hot configs for the book that are used frequently by the book.
 #[repr(C)]
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BookConfigHot {
     /// Minimum price increment for orders. When set, order prices must be
     /// exact multiples of this value. `None` disables validation (default).

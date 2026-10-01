@@ -38,7 +38,7 @@ pub struct PriceLevelExecution {
 }
 
 /// A price level in a limit order book, lock-free on the match path.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PriceLevel {
     /// The order queue in time priority.
     orders: OrderQueue,
@@ -137,6 +137,96 @@ impl PriceLevel {
         self.orders.remove(arena, idx);
         self.visible_quantity.0 -= visible.0;
         self.hidden_quantity.0 -= hidden.0;
+    }
+
+    /// Applies a fill to a resting maker (OMS_Slave only): deducts the filled
+    /// quantity from the maker's visible quantity and replays the
+    /// replenishment rules, mirroring the master's maker settlement exactly.
+    /// The master emits a `Filled` change instead of `PartiallyFilled` when
+    /// the maker has no replenishment left, so this never removes an order.
+    pub(crate) fn apply_fill(
+        &mut self,
+        arena: &mut Slab<OrderNode>,
+        idx: OrderIdx,
+        filled: Quantity,
+    ) {
+        let (visible, kind) = {
+            let node = arena.get(idx as usize).expect("queued order exists in the arena");
+            (node.hot.quantity, node.cold.kind)
+        };
+        debug_assert!(
+            visible.0 >= filled.0,
+            "the fill {} exceeds the maker's visible quantity {}",
+            filled.0,
+            visible.0
+        );
+        {
+            let node = arena.get_mut(idx as usize).expect("queued order exists in the arena");
+            node.hot.quantity.0 -= filled.0;
+        }
+        self.visible_quantity.0 -= filled.0;
+
+        let remaining =
+            arena.get(idx as usize).expect("queued order exists in the arena").hot.quantity;
+        if remaining.0 == 0 {
+            let drawn = {
+                let node = arena.get_mut(idx as usize).expect("queued order exists in the arena");
+                match kind {
+                    OrderKind::Iceberg { hidden_quantity } if hidden_quantity.0 > 0 => {
+                        replenish_iceberg(node, visible)
+                    }
+                    OrderKind::ReserveOrder { auto_replenish: true, .. } => {
+                        debug_assert!(
+                            node.hidden_quantity().0 > 0,
+                            "an exhausted reserve without hidden quantity is removed by the master"
+                        );
+                        replenish_reserve(node)
+                    }
+                    _ => {
+                        unreachable!(
+                            "the master emits a Filled change for a maker with no replenishment"
+                        )
+                    }
+                }
+            };
+            self.hidden_quantity.0 -= drawn.0;
+            self.visible_quantity.0 += drawn.0;
+            self.move_to_tail(arena, idx);
+        } else if let OrderKind::ReserveOrder { auto_replenish: true, .. } = kind {
+            let drawn = {
+                let node = arena.get_mut(idx as usize).expect("queued order exists in the arena");
+                replenish_reserve(node)
+            };
+            if drawn.0 > 0 {
+                self.hidden_quantity.0 -= drawn.0;
+                self.visible_quantity.0 += drawn.0;
+                self.move_to_tail(arena, idx);
+            }
+        }
+    }
+
+    /// Records an order added to the level in the level statistics; a no-op
+    /// when the statistics are disabled (OMS master).
+    pub(crate) fn stats_record_added(&mut self) {
+        if let Some(stats) = &mut self.stats {
+            stats.record_added();
+        }
+    }
+
+    /// Records an order removed from the level in the level statistics; a
+    /// no-op when the statistics are disabled (OMS master).
+    pub(crate) fn stats_record_removed(&mut self) {
+        if let Some(stats) = &mut self.stats {
+            stats.record_removed();
+        }
+    }
+
+    /// Records an execution at the level in the level statistics; a no-op
+    /// when the statistics are disabled (OMS master).
+    pub(crate) fn stats_record_executed(&mut self, quantity: usize, value: u64, now: TimestampMs) {
+        if let Some(stats) = &mut self.stats {
+            stats.record_executed(quantity, value, now);
+        }
     }
 
     /// The quantity a sweep can still extract from this level before it is
@@ -292,12 +382,6 @@ impl PriceLevel {
         Ok(PriceLevelExecution { changes, trades, removed, taker_killed })
     }
 
-    /// apply changes to the price level, only ran by the OMS_Slave to replicate the state.
-    pub fn apply(&mut self) -> Result<(), PriceLevelError> {
-        // todo: implement this
-        Ok(())
-    }
-
     /// Pops the queue head and removes its quantities from the level totals.
     /// Returns the order that left the queue.
     fn pop_order(&mut self, arena: &mut Slab<OrderNode>) -> Order {
@@ -441,7 +525,7 @@ impl PriceLevel {
 
     /// Re-links the queue head to the tail: a replenished order loses its
     /// time priority slot.
-    fn move_to_tail(&mut self, arena: &mut Slab<OrderNode>, idx: OrderIdx) {
+    pub(crate) fn move_to_tail(&mut self, arena: &mut Slab<OrderNode>, idx: OrderIdx) {
         let popped = self.orders.pop_front(arena);
         debug_assert_eq!(popped, idx);
         self.orders.push_back(arena, idx);

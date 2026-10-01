@@ -123,6 +123,12 @@ impl Clone for PooledIndexList {
     }
 }
 
+impl PartialEq for PooledIndexList {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
 impl fmt::Debug for PooledIndexList {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_list().entries(self.guard.iter()).finish()
