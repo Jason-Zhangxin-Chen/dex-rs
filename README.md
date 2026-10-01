@@ -1,6 +1,6 @@
 # dex-rs
 
-A decentralized exchange with **off-chain execution and on-chain settlement**.
+A decentralized exchange with **an ultra low latency off-chain execution layer and an on-chain settlement protocol**.
 
 [![CI](https://github.com/Jason-Zhangxin-Chen/dex-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/Jason-Zhangxin-Chen/dex-rs/actions/workflows/ci.yml)
 
@@ -10,7 +10,7 @@ dex-rs is a decentralized exchange composed of two halves:
 
 - **On-chain protocols** for margin-account management and settlement management,
   using EVM-compatible address/signature primitives (`alloy` is pinned for chain interop).
-- **An off-chain distributed system** for order execution, wired by low latency IPC queue and NATS streaming protocols
+- **An ultra low latency off-chain execution layer** for order execution, wired by low latency IPC queue and NATS streaming protocols
   made up of seven services:
 
   | Service | Responsibility |
