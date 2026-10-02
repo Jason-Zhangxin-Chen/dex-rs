@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 /// Replication message contains the changes of the book triggered by an
 /// ingress OrderMsg and the last trade price of the execution. The last trade
 /// price is `None` when the execution produced no trades; a `Some` price also
-/// carries the has-traded state (the flag is true once any execution traded).
+/// carries the has-traded state (the flag is true once any execution traded). The listener of
+/// the [`SVD_OMS_Master`] can fanout the replication messages to the downstream system
+/// for state replication.
 #[repr(C)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplicationMsg {
