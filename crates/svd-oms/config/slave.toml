@@ -1,0 +1,83 @@
+# SVD_OMS_Slave sample config.
+#
+# The slave is the side path: it consumes the master's replication stream
+# (NATS JetStream), applies the changes to a local book copy, publishes
+# them to the Redis cluster and persists periodic snapshots to the local
+# journal. On restart it recovers from the journal (or the Redis snapshot)
+# and replays the stream from the checkpoint sequence.
+#
+# A SIGHUP reload of this file with `mode = "master"` promotes the slave:
+# it stops consuming and starts executing the ingress queue (promotion).
+
+# The engine mode: "master" executes, "slave" replicates.
+mode = "slave"
+
+# The market symbol of this book: a `0x`-prefixed hex string (up to 64 hex
+# digits, left-padded to 32 bytes) or a plain ASCII name of at most 32
+# bytes. It derives the NATS subject / stream and the Redis keys.
+symbol = "ETHUSDC"
+
+# Core id the core thread is pinned to. Omit to leave the thread unpinned.
+core_id = 3
+
+# The replication stream. The engine connects to the first reachable URL;
+# `stream_name` and `subject` default to the symbol-derived names and must
+# match the master's.
+[nats]
+urls = ["nats://127.0.0.1:4222"]
+
+# The ingress SPSC queue the slave takes over after a promotion.
+[ingress]
+path = "/dev/shm/svd_oms_ethusdc.ingress"
+capacity = 65536
+create = false
+
+# The trade SPSC queue wired to SVD_Settlement, used after a promotion.
+[settlement]
+path = "/dev/shm/svd_oms_ethusdc.settlement"
+capacity = 65536
+create = false
+
+# The snapshot cadence: the book state is snapshotted with the NATS stream
+# sequence as the checkpoint. Reloadable at runtime via SIGHUP.
+[snapshot]
+interval_ms = 5000
+
+# The local journal persisting the snapshots.
+[journal]
+path = "/var/lib/svd-oms/ethusdc.journal"
+# Total file size in bytes, header included.
+size = 67108864
+
+# Optional Redis cluster of the side path: changes are published to the
+# symbol's channel, snapshots are stored under the symbol's key. Omit the
+# table to disable Redis.
+[redis]
+# Seed node URLs of the cluster; the topology is discovered from them.
+urls = ["redis://127.0.0.1:6379"]
+# Number of cluster connections kept in the pool.
+pool_size = 4
+
+# The order book configs, identical to the master's.
+[book]
+
+[book.hot]
+tick_size = 1
+lot_size = 1
+min_order_size = 1
+max_order_size = 100000
+stp_mode = "cancel_both"
+
+[book.hot.risk_config]
+max_open_orders_per_account = 100
+max_notional_per_account = 10000000000
+price_band_bps = 500
+reference_price = "mid"
+
+[book.cold]
+arena_size = 100000
+order_index_size = 100000
+user_order_map_size = 256
+price_level_map_size = 1024
+trade_list_size = 32
+trade_list_pool_size = 128
