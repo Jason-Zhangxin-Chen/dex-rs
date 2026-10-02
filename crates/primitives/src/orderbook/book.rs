@@ -99,6 +99,20 @@ impl OrderBook {
         self.state.attach_pools(&self.memory_pools);
     }
 
+    /// Borrows the state of the book. The OMS slave uses it to take
+    /// snapshots of the book for the journal and the recovery process.
+    pub fn snapshot_state(&self) -> &OrderBookState {
+        &self.state
+    }
+
+    /// Restores the state of the book, e.g. from a snapshot loaded by the
+    /// OMS slave during recovery. The pooled user order lists of the
+    /// deserialized state are re-attached to the book's memory pools.
+    pub fn restore_state(&mut self, state: OrderBookState) {
+        self.state = state;
+        self.attach_pools();
+    }
+
     /// Execute is ran by OMS_Master to execute the ingress request from user.
     /// The listener callback will emit change events and trade events for the
     /// downstream components. The fanout messages are pooled buffers: their
