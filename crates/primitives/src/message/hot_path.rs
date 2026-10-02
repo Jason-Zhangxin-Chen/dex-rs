@@ -8,7 +8,9 @@ use crate::signature::Signature;
 use crate::value::{Price, Quantity, TimestampMs};
 use serde::{Deserialize, Serialize};
 
-/// Messages sent from user end.
+/// Messages sent from user end. It is forwarded to [`SVD_OMS_Master`] from ['SVD_Pretrade']for
+/// processing via share memory SPSC queue. The messages are fixed sized for preallocation
+/// in share memory.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum OrderMsg {
     /// New Order.
@@ -97,7 +99,8 @@ impl CancelOrder {
 /// Message sent from [`SVD_OMS_Master`] to [`SVD_OMS_Settlement`].
 /// Trade defines the exchange between two orders, a matching can generate multiple
 /// Trades for an ingress order. The [`SVD_Settlement`] batches it and submit them to
-/// Settlement protocol contract.
+/// Settlement protocol contract. The listener of the [`SVD_OMS_Master`] can fanout the
+/// trade events to the downstream system for settlement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Trade {
     /// Taker order, the ingress order.
