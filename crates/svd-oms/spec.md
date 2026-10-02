@@ -73,6 +73,27 @@ pub struct ReplicationMsg {
 }
 
 ```
+## The dependency of svd-oms crate
+- order book: The book logics are implemented in crates/primitives/src/orderbook which includes order execution
+and state replication logic.
+- ipc: The share memory SPSC queue is implemented in crates/ipc, which is used for the communication between
+SVD_Pretrade and SVD_OMS_Master.
+- NATS: You have to import the NATS client crate to the project, remember to use the `symbol` as the subject of the
+NATS stream, so that the SVD_OMS_Slave can subscribe to the corresponding stream for the symbol.
+ The NATS stream is used for the communication between SVD_OMS_Master and SVD_OMS_Slave.
+
+## The concurrency model of svd-oms crate
+- SVD_OMS_Master: 1 thread pined and spin loop to fetch batch of requests from the SPSC queue, execute the user request.
+    The listener's fanout closures are executed in the same thread to deliver the fanout messages into the other threads
+    for messaging, thus that the core thread will not being blocking on the fanout I/O. Thus there will be 3 threads in
+     total for the SVD_OMS_Master, one for the core thread, one for the NATS message delivery and one for trades message
+     wired by share memory SPSC queue to the SVD_OMS_Settlement.
+
+- SVD_OMS_Slave: 1 thread pined and spin loop to fetch the order change from the NATS stream, apply the order change to the book
+    state and publish the book state changes to the Redis_Cluster and SQL_Cluster. It also runs a snapshot thread to
+    take a snapshot of the book state with a NATS message sequence as the check point, and persist it to the local
+    journal and Redis Cluster. The snapshot is used for the state recovery of the book.
+
 ## The features in svd-oms crate
 
 - config: A shared configuration for the orderbook, a [Master/Slave] mode config bind with their corresponding
