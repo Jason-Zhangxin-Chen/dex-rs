@@ -1,0 +1,68 @@
+# SVD_OMS_Master sample config.
+#
+# The master is the hot path: it consumes the ingress SPSC queue from
+# SVD_Pretrade, executes the requests and replicates the book changes to
+# SVD_OMS_Slave via NATS JetStream. Trades are fanned out to SVD_Settlement
+# through a share-memory SPSC queue.
+
+# The engine mode: "master" executes, "slave" replicates.
+mode = "master"
+
+# The market symbol of this book: a `0x`-prefixed hex string (up to 64 hex
+# digits, left-padded to 32 bytes) or a plain ASCII name of at most 32
+# bytes. It derives the NATS subject / stream and the Redis keys.
+symbol = "ETHUSDC"
+
+# Core id the core thread is pinned to. Omit to leave the thread unpinned.
+core_id = 2
+
+# Max number of requests popped from the ingress queue per batch.
+batch_size = 1024
+
+# The replication stream. The engine connects to the first reachable URL;
+# `stream_name` and `subject` default to the symbol-derived names.
+[nats]
+urls = ["nats://127.0.0.1:4222"]
+
+# The ingress SPSC queue wired from SVD_Pretrade.
+[ingress]
+path = "/dev/shm/svd_oms_ethusdc.ingress"
+capacity = 65536
+# Whether this process initializes the queue's file on open.
+create = true
+
+# The trade SPSC queue wired to SVD_Settlement.
+[settlement]
+path = "/dev/shm/svd_oms_ethusdc.settlement"
+capacity = 65536
+create = true
+
+# The order book configs.
+[book]
+
+# Hot configs: market parameters and risk limits.
+[book.hot]
+tick_size = 1
+lot_size = 1
+min_order_size = 1
+max_order_size = 100000
+# STP modes: "none", "cancel_taker", "cancel_maker", "cancel_both".
+stp_mode = "cancel_both"
+
+# Optional risk limits; the reference price is "last_trade", "mid" or an
+# inline fixed price table `{ fixed_price = <ticks> }`.
+[book.hot.risk_config]
+max_open_orders_per_account = 100
+max_notional_per_account = 10000000000
+price_band_bps = 500
+reference_price = "mid"
+
+# Cold configs: the pre-allocation sizes of the book structures. The
+# `symbol` entry is ignored, the top-level symbol wins.
+[book.cold]
+arena_size = 100000
+order_index_size = 100000
+user_order_map_size = 256
+price_level_map_size = 1024
+trade_list_size = 32
+trade_list_pool_size = 128
