@@ -118,12 +118,18 @@ monotonic increasing sequence number of the write operation, the offset and leng
 writing the binary log, the log engine always replace the metadata which is to be expired in the header, making the
 current write as the latest version while letting the last write as the previous one, thus that we can detect the
 corruption of the journal by checking the sequence number of the last two writes. And select the lower version as
-the valid one for recovery.
+the valid one for recovery. The journal file is memory-mapped: a write copies the payload into the mapped pages
+and flushes only the touched ranges to the storage device, which removes the read and write syscalls from the
+snapshot path.
+
+- snapshot persistence: The snapshot persistence is configurable, the snapshots can be persisted to the local
+journal, the Redis_Cluster, or both of them. The selection takes effect on the next restart.
 
 - state recovery: The state recovery is the process of rebuilding the orderbook state from the journal and the NATS
-stream. When the SVD_OMS_Slave is restarted, it fetches the latest snapshot from the journal, and replays the order
-change from the NATS stream starting from the check point to rebuild the book state. If the journal is not available,
-it will fetch the latest snapshot from the Redis_Cluster, and replays the order change from the NATS.
+stream. When the SVD_OMS_Slave is restarted, it fetches the latest snapshot from the configured persistence sinks,
+with the journal preferred over the Redis_Cluster, and replays the order change from the NATS stream starting from
+the check point to rebuild the book state. If the journal is not available and the Redis_Cluster is a configured
+sink, it will fetch the latest snapshot from the Redis_Cluster, and replays the order change from the NATS.
 
 - mode switch: It is triggered by system admin after get prepared: Dual instances of the SVD_OMS_Slave are running,
 with both of them get synced to the latest state, then a switching command (the configuration update event) is sent to

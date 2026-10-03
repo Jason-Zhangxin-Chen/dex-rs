@@ -2,8 +2,9 @@
 //!
 //! The config is loaded from a TOML file and can be reloaded at runtime via
 //! SIGHUP. Reloadable at runtime: [`OmsConfig::mode`] (a slave is promoted
-//! to a master when the mode flips) and [`OmsConfig::snapshot`] cadence.
-//! Everything else takes effect on the next restart.
+//! to a master when the mode flips) and the [`OmsConfig::snapshot`] interval.
+//! Everything else — the snapshot persistence target included — takes effect
+//! on the next restart.
 
 use std::path::{Path, PathBuf};
 
@@ -351,18 +352,47 @@ pub struct SpScConfig {
     pub create: bool,
 }
 
-/// The snapshot cadence of the slave.
+/// Which sinks the slave persists the snapshots to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SnapshotPersist {
+    /// The local journal only.
+    Journal,
+    /// The Redis cluster only.
+    Redis,
+    /// The local journal and the Redis cluster.
+    #[default]
+    Both,
+}
+
+impl SnapshotPersist {
+    /// Whether the snapshots are persisted to the local journal.
+    pub fn includes_journal(self) -> bool {
+        matches!(self, SnapshotPersist::Journal | SnapshotPersist::Both)
+    }
+
+    /// Whether the snapshots are persisted to the Redis cluster.
+    pub fn includes_redis(self) -> bool {
+        matches!(self, SnapshotPersist::Redis | SnapshotPersist::Both)
+    }
+}
+
+/// The snapshot behavior of the slave: the cadence and the sinks the
+/// snapshots are persisted to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SnapshotConfig {
     /// Snapshot interval in milliseconds.
     #[serde(default = "default_snapshot_interval_ms")]
     pub interval_ms: u64,
+    /// Which sinks the snapshots are persisted to.
+    #[serde(default)]
+    pub persist: SnapshotPersist,
 }
 
 impl Default for SnapshotConfig {
     fn default() -> Self {
-        Self { interval_ms: DEFAULT_SNAPSHOT_INTERVAL_MS }
+        Self { interval_ms: DEFAULT_SNAPSHOT_INTERVAL_MS, persist: SnapshotPersist::default() }
     }
 }
 
@@ -500,6 +530,7 @@ create = false
 
 [snapshot]
 interval_ms = 1000
+persist = "both"
 
 [journal]
 path = "/var/lib/svd-oms/journal.bin"
@@ -546,6 +577,7 @@ trade_list_pool_size = 128
         assert_eq!(config.ingress.capacity, 65536);
         assert!(!config.settlement.create);
         assert_eq!(config.snapshot.interval_ms, 1000);
+        assert_eq!(config.snapshot.persist, SnapshotPersist::Both);
         assert_eq!(config.journal.path, PathBuf::from("/var/lib/svd-oms/journal.bin"));
         assert_eq!(config.journal.size, 16 * 1024 * 1024);
         let redis = config.redis.as_ref().unwrap();
@@ -584,10 +616,30 @@ capacity = 1024
         assert_eq!(config.nats.urls, vec!["nats://127.0.0.1:4222"]);
         assert_eq!(config.batch_size, DEFAULT_BATCH_SIZE);
         assert_eq!(config.snapshot.interval_ms, DEFAULT_SNAPSHOT_INTERVAL_MS);
+        assert_eq!(config.snapshot.persist, SnapshotPersist::Both);
         assert_eq!(config.journal.path, default_journal_path());
         assert_eq!(config.journal.size, default_journal_size());
         assert!(config.redis.is_none());
         assert!(config.ingress.create);
+    }
+
+    #[test]
+    fn test_snapshot_persist_names() {
+        for (name, persist) in [
+            ("journal", SnapshotPersist::Journal),
+            ("redis", SnapshotPersist::Redis),
+            ("both", SnapshotPersist::Both),
+        ] {
+            let config = OmsConfig::from_toml(&format!(
+                "mode = \"slave\"\nsymbol = \"X\"\n[ingress]\npath = \"/tmp/q\"\ncapacity = 8\n[settlement]\npath = \"/tmp/s\"\ncapacity = 8\n[snapshot]\npersist = \"{name}\"\n"
+            ))
+            .unwrap();
+            assert_eq!(config.snapshot.persist, persist);
+        }
+        assert!(OmsConfig::from_toml(
+            "mode = \"slave\"\nsymbol = \"X\"\n[ingress]\npath = \"/tmp/q\"\ncapacity = 8\n[settlement]\npath = \"/tmp/s\"\ncapacity = 8\n[snapshot]\npersist = \"memory\"\n"
+        )
+        .is_err());
     }
 
     #[test]

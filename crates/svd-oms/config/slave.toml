@@ -38,10 +38,15 @@ path = "/dev/shm/svd_oms_ethusdc.settlement"
 capacity = 65536
 create = false
 
-# The snapshot cadence: the book state is snapshotted with the NATS stream
-# sequence as the checkpoint. Reloadable at runtime via SIGHUP.
+# The snapshot behavior: the book state is snapshotted with the NATS
+# stream sequence as the checkpoint. The interval is reloadable at
+# runtime via SIGHUP; the persistence target takes effect on the next
+# restart.
 [snapshot]
 interval_ms = 5000
+# Which sinks the snapshots are persisted to: "journal", "redis" or
+# "both". "redis" requires the [redis] table below.
+persist = "both"
 
 # The local journal persisting the snapshots.
 [journal]
