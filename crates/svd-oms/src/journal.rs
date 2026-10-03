@@ -1,13 +1,16 @@
 //! The journal: a local persistent storage of the book snapshots.
 //!
-//! The journal file is a fixed header followed by a payload area used as a
-//! ring buffer. The header holds **dual instances** of the metadata of the
-//! last two writes; each metadata stores the monotonic write sequence
-//! number, the offset and the length of the payload, and its CRC32.
+//! The journal is a **memory-mapped file**: a fixed header followed by a
+//! payload area used as a ring buffer. The mapping removes the read and
+//! write syscalls from the snapshot path — a write copies the payload into
+//! the mapped pages and flushes only the touched ranges to the storage
+//! device. The header holds **dual instances** of the metadata of the last
+//! two writes; each metadata stores the monotonic write sequence number,
+//! the offset and the length of the payload, and its CRC32.
 //!
-//! A write appends the payload and then replaces the metadata of the *older*
+//! A write copies the payload and then replaces the metadata of the *older*
 //! of the two slots, which turns the new write into the latest version while
-//! the previous one stays as the fallback. A crash between the payload write
+//! the previous one stays as the fallback. A crash between the payload flush
 //! and the metadata update leaves the fallback slot intact; a torn metadata
 //! update fails the payload CRC check, so recovery detects the corruption by
 //! checking the two writes and selects the lower, valid version.
@@ -17,8 +20,9 @@
 //! payload may be overwritten — its metadata is replaced next anyway.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
+
+use memmap2::{MmapMut, MmapOptions};
 
 /// Magic of the journal header.
 const MAGIC: [u8; 8] = *b"SVDJRN01";
@@ -123,10 +127,11 @@ impl Slot {
     }
 }
 
-/// The dual-instance journal of the book snapshots.
+/// The dual-instance journal of the book snapshots, backed by a
+/// memory-mapped file.
 pub struct Journal {
-    /// The journal file.
-    file: File,
+    /// The memory-mapped journal file: the header and the payload area.
+    mmap: MmapMut,
     /// Size of the payload area.
     capacity: u64,
     /// Sequence number of the next write.
@@ -141,22 +146,49 @@ pub struct Journal {
 impl Journal {
     /// Opens (creating when missing) the journal file of the given total
     /// size. A fresh or zero-length file is initialized with an empty
-    /// header; an existing file is validated and its state recovered.
+    /// header; an existing file is validated and its state recovered. The
+    /// file is mapped whole: all the journal I/O operates on the mapping.
     pub fn open<P: AsRef<Path>>(path: P, size: u64) -> Result<Self, JournalError> {
         if size <= HEADER_SIZE {
             return Err(JournalError::BadFormat(format!(
                 "the journal size {size} must exceed the {HEADER_SIZE}-byte header"
             )));
         }
+        let len = usize::try_from(size).map_err(|_| {
+            JournalError::BadFormat("the journal size does not fit the address space".to_string())
+        })?;
         let capacity = size - HEADER_SIZE;
-        let mut file =
+        let file =
             OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path)?;
-        if file.metadata()?.len() == 0 {
-            return Self::init(file, capacity, size);
+        let file_len = file.metadata()?.len();
+        if file_len == 0 {
+            return Self::init(file, capacity, len);
         }
-        file.seek(SeekFrom::Start(0))?;
-        let mut header = [0u8; HEADER_SIZE as usize];
-        file.read_exact(&mut header)?;
+        // A file shorter than the configured size is grown to it; the ring
+        // never addresses beyond the configured area, so the growth is
+        // safe. A longer file is mapped only up to the configured size,
+        // matching the area the slots may address.
+        if file_len < size {
+            file.set_len(size)?;
+        }
+        let mmap = unsafe { MmapOptions::new().len(len).map_mut(&file)? };
+        Self::open_existing(mmap, capacity)
+    }
+
+    /// Initializes a fresh journal file with an empty header.
+    fn init(file: File, capacity: u64, len: usize) -> Result<Self, JournalError> {
+        file.set_len(len as u64)?;
+        let mut mmap = unsafe { MmapOptions::new().len(len).map_mut(&file)? };
+        mmap[0..8].copy_from_slice(&MAGIC);
+        mmap[VERSION_OFFSET as usize..VERSION_OFFSET as usize + 4]
+            .copy_from_slice(&VERSION.to_le_bytes());
+        mmap.flush_range(0, HEADER_SIZE as usize)?;
+        Ok(Self { mmap, capacity, next_seq: 1, slots: [Slot::EMPTY; 2], latest: None })
+    }
+
+    /// Validates the header of an existing journal and recovers its state.
+    fn open_existing(mmap: MmapMut, capacity: u64) -> Result<Self, JournalError> {
+        let header = &mmap[0..HEADER_SIZE as usize];
         if header[0..8] != MAGIC {
             return Err(JournalError::BadFormat("the magic does not match".to_string()));
         }
@@ -168,43 +200,28 @@ impl Journal {
         if version != VERSION {
             return Err(JournalError::BadFormat(format!("unsupported journal version {version}")));
         }
-        let slots =
-            [Self::read_slot(&mut file, SLOT0_OFFSET)?, Self::read_slot(&mut file, SLOT1_OFFSET)?];
+        let slots = [Self::read_slot(header, SLOT0_OFFSET), Self::read_slot(header, SLOT1_OFFSET)];
         // The write sequence continues after the newest slot, so a reopened
         // journal never reuses a sequence number.
         let next_seq = slots.iter().map(|slot| slot.seq).max().unwrap_or(0).saturating_add(1);
         // The latest valid write, once the payloads are checked.
-        let latest = valid_slot(&mut file, &slots, capacity)?.map(|(index, _)| index);
-        Ok(Self { file, capacity, next_seq, slots, latest })
-    }
-
-    /// Initializes a fresh journal file with an empty header.
-    fn init(mut file: File, capacity: u64, size: u64) -> Result<Self, JournalError> {
-        file.set_len(size)?;
-        let mut header = [0u8; HEADER_SIZE as usize];
-        header[0..8].copy_from_slice(&MAGIC);
-        header[VERSION_OFFSET as usize..VERSION_OFFSET as usize + 4]
-            .copy_from_slice(&VERSION.to_le_bytes());
-        file.seek(SeekFrom::Start(0))?;
-        file.write_all(&header)?;
-        file.sync_all()?;
-        Ok(Self { file, capacity, next_seq: 1, slots: [Slot::EMPTY; 2], latest: None })
+        let latest = valid_slot(&mmap, &slots, capacity).map(|(index, _)| index);
+        Ok(Self { mmap, capacity, next_seq, slots, latest })
     }
 
     /// Reads one metadata slot from the header.
-    fn read_slot(file: &mut File, offset: u64) -> Result<Slot, JournalError> {
-        file.seek(SeekFrom::Start(offset))?;
-        let mut bytes = [0u8; SLOT_SIZE];
-        file.read_exact(&mut bytes)?;
-        Ok(Slot::decode(&bytes))
+    fn read_slot(header: &[u8], offset: u64) -> Slot {
+        let bytes: [u8; SLOT_SIZE] =
+            header[offset as usize..offset as usize + SLOT_SIZE].try_into().expect("32 bytes");
+        Slot::decode(&bytes)
     }
 
-    /// Writes one metadata slot into the header.
+    /// Writes one metadata slot into the mapped header and flushes it.
     fn write_slot(&mut self, index: usize) -> Result<(), JournalError> {
         let offset = if index == 0 { SLOT0_OFFSET } else { SLOT1_OFFSET };
-        self.file.seek(SeekFrom::Start(offset))?;
-        self.file.write_all(&self.slots[index].encode())?;
-        self.file.sync_all()?;
+        self.mmap[offset as usize..offset as usize + SLOT_SIZE]
+            .copy_from_slice(&self.slots[index].encode());
+        self.mmap.flush_range(offset as usize, SLOT_SIZE)?;
         Ok(())
     }
 
@@ -213,11 +230,7 @@ impl Journal {
     /// sequence wins. A torn latest write therefore falls back to the
     /// previous one, and a fully corrupt journal recovers nothing.
     pub fn recover(&mut self) -> Result<Option<Vec<u8>>, JournalError> {
-        let (_, payload) = match valid_slot(&mut self.file, &self.slots, self.capacity)? {
-            Some(found) => found,
-            None => return Ok(None),
-        };
-        Ok(Some(payload))
+        Ok(valid_slot(&self.mmap, &self.slots, self.capacity).map(|(_, payload)| payload))
     }
 
     /// Appends a snapshot payload, replacing the older metadata slot with
@@ -259,10 +272,11 @@ impl Journal {
         let pos = if start + len <= self.capacity { start } else { 0 };
 
         // Payload first, metadata second: a crash in between leaves the
-        // latest slot untouched.
-        self.file.seek(SeekFrom::Start(HEADER_SIZE + pos))?;
-        self.file.write_all(payload)?;
-        self.file.sync_all()?;
+        // latest slot untouched. The copy lands in the mapped pages and
+        // only the touched ranges are flushed to the storage device.
+        let offset = HEADER_SIZE + pos;
+        self.mmap[offset as usize..offset as usize + payload.len()].copy_from_slice(payload);
+        self.mmap.flush_range(offset as usize, payload.len())?;
 
         let seq = self.next_seq;
         self.slots[target] =
@@ -281,32 +295,28 @@ impl Journal {
 
 /// Finds the valid slot with the highest sequence: reads the payload each
 /// slot addresses and verifies its CRC.
-fn valid_slot(
-    file: &mut File,
-    slots: &[Slot; 2],
-    capacity: u64,
-) -> Result<Option<(usize, Vec<u8>)>, JournalError> {
+fn valid_slot(mmap: &MmapMut, slots: &[Slot; 2], capacity: u64) -> Option<(usize, Vec<u8>)> {
     let mut best: Option<(u64, usize, Vec<u8>)> = None;
     for (index, slot) in slots.iter().enumerate() {
         if slot.is_empty() || !slot.region_in_area(capacity) {
             continue;
         }
-        file.seek(SeekFrom::Start(HEADER_SIZE + slot.offset))?;
-        let mut payload = vec![0u8; slot.len as usize];
-        file.read_exact(&mut payload)?;
+        let offset = HEADER_SIZE as usize + slot.offset as usize;
+        let payload = mmap[offset..offset + slot.len as usize].to_vec();
         if crc32fast::hash(&payload) == slot.crc
             && best.as_ref().is_none_or(|(seq, _, _)| slot.seq > *seq)
         {
             best = Some((slot.seq, index, payload));
         }
     }
-    Ok(best.map(|(_, index, payload)| (index, payload)))
+    best.map(|(_, index, payload)| (index, payload))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::{Read, Seek, SeekFrom, Write};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -340,6 +350,12 @@ mod tests {
         vec![tag; len]
     }
 
+    /// Corrupts the payload region a slot addresses, as a torn write would.
+    fn corrupt_payload(journal: &mut Journal, slot: Slot) {
+        let offset = HEADER_SIZE as usize + slot.offset as usize;
+        journal.mmap[offset..offset + slot.len as usize].fill(0xff);
+    }
+
     #[test]
     fn test_fresh_journal_recovers_nothing() {
         let (mut journal, _guard) = open_journal("fresh", 4096);
@@ -371,11 +387,8 @@ mod tests {
         journal.write(&payload(0x22, 32)).unwrap();
 
         // Corrupt the latest payload (written at the second slot's region).
-        let latest = journal.latest.unwrap();
-        let slot = journal.slots[latest];
-        journal.file.seek(SeekFrom::Start(HEADER_SIZE + slot.offset)).unwrap();
-        journal.file.write_all(&[0xff; 32]).unwrap();
-        journal.file.sync_all().unwrap();
+        let slot = journal.slots[journal.latest.unwrap()];
+        corrupt_payload(&mut journal, slot);
 
         assert_eq!(journal.recover().unwrap().unwrap(), payload(0x11, 32));
     }
@@ -387,10 +400,8 @@ mod tests {
         journal.write(&payload(0x22, 32)).unwrap();
         for index in [0usize, 1] {
             let slot = journal.slots[index];
-            journal.file.seek(SeekFrom::Start(HEADER_SIZE + slot.offset)).unwrap();
-            journal.file.write_all(&[0xff; 32]).unwrap();
+            corrupt_payload(&mut journal, slot);
         }
-        journal.file.sync_all().unwrap();
         assert_eq!(journal.recover().unwrap(), None);
     }
 
@@ -476,5 +487,38 @@ mod tests {
         let path = temp_path("small");
         let _guard = TempFile(path.clone());
         assert!(Journal::open(&path, HEADER_SIZE).is_err());
+    }
+
+    #[test]
+    fn test_write_is_visible_via_the_file() {
+        // The flushed pages are visible to a reader of the file itself,
+        // which is what the next process opening the journal sees.
+        let (mut journal, guard) = open_journal("filevisible", 4096);
+        journal.write(&payload(0x5a, 64)).unwrap();
+        let slot = journal.slots[journal.latest.unwrap()];
+        let mut file = File::open(&guard.0).unwrap();
+        file.seek(SeekFrom::Start(HEADER_SIZE + slot.offset)).unwrap();
+        let mut read = [0u8; 64];
+        file.read_exact(&mut read).unwrap();
+        assert_eq!(payload(0x5a, 64), read);
+    }
+
+    #[test]
+    fn test_reopen_with_a_resized_journal() {
+        let path = temp_path("resize");
+        let _guard = TempFile(path.clone());
+        {
+            let mut journal = Journal::open(&path, 2048).unwrap();
+            journal.write(&payload(0x11, 64)).unwrap();
+        }
+        // A larger configured size grows the file; the snapshot survives.
+        let mut journal = Journal::open(&path, 4096).unwrap();
+        assert_eq!(journal.recover().unwrap().unwrap(), payload(0x11, 64));
+        journal.write(&payload(0x22, 64)).unwrap();
+        drop(journal);
+        // A smaller configured size maps only the head of the file; the
+        // snapshot at offset 64 still recovers.
+        let mut journal = Journal::open(&path, 2048).unwrap();
+        assert_eq!(journal.recover().unwrap().unwrap(), payload(0x22, 64));
     }
 }

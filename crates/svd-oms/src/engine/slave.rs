@@ -3,12 +3,13 @@
 //! Two threads: the pinned core thread consumes the master's replication
 //! stream (NATS JetStream), applies the changes to a local book copy, and
 //! dispatches the changes and the periodic snapshots to the side I/O
-//! thread, which publishes them to Redis and persists the snapshots to the
-//! local journal. On restart the slave recovers the book from the journal
-//! (or the Redis snapshot) and replays the stream from the checkpoint
-//! sequence. A SIGHUP config update flipping the mode promotes the slave:
-//! it drops the NATS consumer and starts executing the ingress requests as
-//! the new master.
+//! thread, which publishes the changes to Redis and persists the snapshots
+//! to the journal and/or the Redis cluster, as configured. On restart the
+//! slave recovers the book from the journal and/or the Redis snapshot (in
+//! that order) and replays the stream from the checkpoint sequence. A
+//! SIGHUP config update flipping the mode promotes the slave: it drops the
+//! NATS consumer and starts executing the ingress requests as the new
+//! master.
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
@@ -22,7 +23,7 @@ use storage::{ChangeSink, RedisStore};
 use tracing::{error, info, warn};
 
 use super::{EngineError, MODE_SLAVE, connect_jetstream};
-use crate::config::OmsConfig;
+use crate::config::{OmsConfig, SnapshotPersist};
 use crate::journal::Journal;
 use crate::naming;
 use crate::snapshot::Snapshot;
@@ -90,12 +91,24 @@ pub fn run(
 }
 
 /// Recovers the book and the journal, and resolves the stream sequence the
-/// consume loop resumes from. The journal is authoritative; a missing or
-/// corrupt journal falls back to the Redis snapshot, then to a fresh book.
-fn recover(oms: &OmsConfig) -> Result<(OrderBook, Journal, u64), EngineError> {
+/// consume loop resumes from. The sinks are those the config selects: the
+/// journal is authoritative over the Redis snapshot; a missing or corrupt
+/// journal falls back to Redis when Redis is a configured persistence
+/// target, then to a fresh book.
+fn recover(oms: &OmsConfig) -> Result<(OrderBook, Option<Journal>, u64), EngineError> {
+    let persist = oms.snapshot.persist;
     let mut book = OrderBook::new(oms.book_config());
-    let mut journal = Journal::open(&oms.journal.path, oms.journal.size)?;
-    let start_seq = match journal.recover()? {
+    let mut journal = match persist {
+        SnapshotPersist::Journal | SnapshotPersist::Both => {
+            Some(Journal::open(&oms.journal.path, oms.journal.size)?)
+        }
+        SnapshotPersist::Redis => None,
+    };
+    let recovered = match journal.as_mut() {
+        Some(journal) => journal.recover()?,
+        None => None,
+    };
+    let start_seq = match recovered {
         Some(bytes) => {
             let snapshot =
                 Snapshot::decode(&bytes).map_err(|err| EngineError::Codec(err.to_string()))?;
@@ -104,8 +117,15 @@ fn recover(oms: &OmsConfig) -> Result<(OrderBook, Journal, u64), EngineError> {
             snapshot.seq
         }
         None => {
-            info!("no journal snapshot, falling back to the Redis snapshot");
-            load_redis_snapshot(oms, &mut book).unwrap_or(0)
+            if persist.includes_redis() {
+                if journal.is_some() {
+                    info!("no journal snapshot, falling back to the Redis snapshot");
+                }
+                load_redis_snapshot(oms, &mut book).unwrap_or(0)
+            } else {
+                info!("no journal snapshot, starting from a fresh book");
+                0
+            }
         }
     };
     // The slave maintains the book statistics the master skips.
@@ -305,7 +325,7 @@ async fn consume(
 enum SideTask {
     /// A replicated change payload for the Redis cluster.
     Change(Vec<u8>),
-    /// A book snapshot for the journal and the Redis cluster. The snapshot
+    /// A book snapshot for the configured persistence sinks. The snapshot
     /// is boxed: the state is far larger than the change payloads the
     /// channel mostly carries.
     Snapshot(Box<Snapshot>),
@@ -317,16 +337,20 @@ struct SideIo {
 }
 
 impl SideIo {
-    /// Spawns the side I/O thread: it takes over the journal and connects
-    /// to the Redis cluster when configured.
-    fn spawn(oms: &OmsConfig, journal: Journal) -> Result<Self, EngineError> {
+    /// Spawns the side I/O thread: it takes over the journal (when the
+    /// persistence target includes it) and connects to the Redis cluster
+    /// when configured.
+    fn spawn(oms: &OmsConfig, journal: Option<Journal>) -> Result<Self, EngineError> {
         let (sender, receiver) = std::sync::mpsc::channel::<SideTask>();
+        let persist = oms.snapshot.persist;
         let redis_config = oms.redis.clone();
         let channel = naming::redis_change_channel(oms.symbol);
         let snapshot_key = naming::redis_snapshot_key(oms.symbol);
         std::thread::Builder::new()
             .name("oms-side-io".to_string())
-            .spawn(move || side_loop(receiver, journal, redis_config, channel, snapshot_key))
+            .spawn(move || {
+                side_loop(receiver, journal, persist, redis_config, channel, snapshot_key)
+            })
             .map_err(|err| {
                 EngineError::Runtime(format!("cannot spawn the side io thread: {err}"))
             })?;
@@ -345,11 +369,12 @@ impl SideIo {
 }
 
 /// The side I/O loop: publishes the changes, persists the snapshots to the
-/// journal and to Redis. Every failure degrades gracefully — the loop logs
-/// and keeps going, the recovery falls back to the NATS replay.
+/// configured sinks. Every failure degrades gracefully — the loop logs and
+/// keeps going, the recovery falls back to the NATS replay.
 fn side_loop(
     receiver: std::sync::mpsc::Receiver<SideTask>,
-    mut journal: Journal,
+    mut journal: Option<Journal>,
+    persist: SnapshotPersist,
     redis_config: Option<storage::RedisConfig>,
     channel: String,
     snapshot_key: String,
@@ -363,6 +388,9 @@ fn side_loop(
             }
         }
     });
+    if persist.includes_redis() && store.is_none() {
+        warn!("the Redis snapshot persistence is enabled but Redis is not connected");
+    }
     while let Ok(task) = receiver.recv() {
         match task {
             SideTask::Change(payload) => {
@@ -374,10 +402,14 @@ fn side_loop(
             }
             SideTask::Snapshot(snapshot) => match snapshot.encode() {
                 Ok(bytes) => {
-                    if let Err(err) = journal.write(&bytes) {
+                    if persist.includes_journal()
+                        && let Some(journal) = &mut journal
+                        && let Err(err) = journal.write(&bytes)
+                    {
                         warn!(error = %err, "cannot write the snapshot to the journal");
                     }
-                    if let Some(store) = &mut store
+                    if persist.includes_redis()
+                        && let Some(store) = &mut store
                         && let Err(err) = store.save_snapshot(&bytes)
                     {
                         warn!(error = %err, "cannot save the snapshot to Redis");
@@ -466,6 +498,37 @@ stp_mode = "cancel_both"
         book.apply(&replicated).expect("the book apply is infallible");
         *last_applied = seq;
         Ok(true)
+    }
+
+    /// A unique path under the system temp dir.
+    fn temp_path(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("dex_oms_slave_{}_{}_{}", std::process::id(), tag, seq))
+    }
+
+    /// Removes the file when dropped, so failed tests don't litter the
+    /// temp dir.
+    struct TempFile(std::path::PathBuf);
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// Spawns the side loop without a Redis cluster and returns its
+    /// channel and thread.
+    fn run_side_loop(
+        journal: Option<Journal>,
+        persist: SnapshotPersist,
+    ) -> (std::sync::mpsc::Sender<SideTask>, std::thread::JoinHandle<()>) {
+        let (sender, receiver) = std::sync::mpsc::channel::<SideTask>();
+        let handle = std::thread::spawn(move || {
+            side_loop(receiver, journal, persist, None, String::new(), String::new())
+        });
+        (sender, handle)
     }
 
     #[test]
@@ -562,16 +625,8 @@ stp_mode = "cancel_both"
         let mut book = OrderBook::new(book_config);
         book.execute(&OrderMsg::NewOrder(order(2, 1, 100, 40, Side::Sell))).unwrap();
 
-        let path = std::env::temp_dir().join(format!("dex_oms_snapshot_{}", std::process::id()));
-        let _guard = {
-            struct Guard(std::path::PathBuf);
-            impl Drop for Guard {
-                fn drop(&mut self) {
-                    let _ = std::fs::remove_file(&self.0);
-                }
-            }
-            Guard(path.clone())
-        };
+        let path = temp_path("snapshot");
+        let _guard = TempFile(path.clone());
         let mut journal = Journal::open(&path, 4096).unwrap();
         let snapshot = Snapshot::new(7, book.snapshot_state().clone());
         journal.write(&snapshot.encode().unwrap()).unwrap();
@@ -585,5 +640,67 @@ stp_mode = "cancel_both"
             rmp_serde::to_vec(recovered.snapshot_state()).unwrap(),
             rmp_serde::to_vec(book.snapshot_state()).unwrap()
         );
+    }
+
+    #[test]
+    fn test_recover_opens_the_journal_when_selected() {
+        let mut oms = config();
+        oms.snapshot.persist = SnapshotPersist::Journal;
+        oms.journal.path = temp_path("recover_journal");
+        let _guard = TempFile(oms.journal.path.clone());
+        let (_book, journal, seq) = recover(&oms).unwrap();
+        assert!(journal.is_some(), "the journal target opens the journal");
+        assert_eq!(seq, 0);
+    }
+
+    #[test]
+    fn test_recover_skips_the_journal_when_redis_only() {
+        let mut oms = config();
+        oms.snapshot.persist = SnapshotPersist::Redis;
+        oms.redis = None;
+        let (_book, journal, seq) = recover(&oms).unwrap();
+        assert!(journal.is_none(), "the redis-only target never opens the journal");
+        assert_eq!(seq, 0);
+    }
+
+    #[test]
+    fn test_side_loop_persists_snapshots_to_the_selected_journal() {
+        let path = temp_path("side_journal");
+        let _guard = TempFile(path.clone());
+        let journal = Journal::open(&path, 4096).unwrap();
+        let (sender, handle) = run_side_loop(Some(journal), SnapshotPersist::Journal);
+
+        let mut book = OrderBook::new(config().book_config());
+        book.execute(&OrderMsg::NewOrder(order(2, 1, 100, 40, Side::Sell))).unwrap();
+        sender
+            .send(SideTask::Snapshot(Box::new(Snapshot::new(9, book.snapshot_state().clone()))))
+            .unwrap();
+        drop(sender);
+        handle.join().unwrap();
+
+        // The snapshot landed in the journal the loop owned.
+        let mut journal = Journal::open(&path, 4096).unwrap();
+        let restored = Snapshot::decode(&journal.recover().unwrap().unwrap()).unwrap();
+        assert_eq!(restored.seq, 9);
+    }
+
+    #[test]
+    fn test_side_loop_skips_sinks_that_are_not_selected() {
+        // Redis-only persistence with no Redis configured: the opened
+        // journal file stays untouched.
+        let path = temp_path("side_skip");
+        let _guard = TempFile(path.clone());
+        let journal = Journal::open(&path, 4096).unwrap();
+        let (sender, handle) = run_side_loop(Some(journal), SnapshotPersist::Redis);
+
+        let book = OrderBook::new(config().book_config());
+        sender
+            .send(SideTask::Snapshot(Box::new(Snapshot::new(3, book.snapshot_state().clone()))))
+            .unwrap();
+        drop(sender);
+        handle.join().unwrap();
+
+        let mut journal = Journal::open(&path, 4096).unwrap();
+        assert_eq!(journal.recover().unwrap(), None);
     }
 }
