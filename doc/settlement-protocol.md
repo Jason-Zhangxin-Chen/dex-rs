@@ -159,24 +159,25 @@ interface ISettlement {
     event SettlementPaused(bool paused);
 }
 
-/// The failure taxonomy of settleBatch. The revert data carries the code and
-/// the index of the failing trade in the batch; [SVD_Settlement] decodes it
-/// and dispatches the recovery actions (see its spec).
-error SettlementError(uint8 code, uint256 index);
+/// The failure taxonomy of settleBatch. The revert data carries the code, the
+/// index of the failing trade in the batch, and the at-fault side (1 = taker,
+/// 2 = maker, 0 = neither); [SVD_Settlement] decodes it and dispatches the
+/// recovery actions (see its spec).
+error SettlementError(uint8 code, uint256 index, uint8 side);
 ```
 
 ### The failure taxonomy
 
 | code | error | meaning | settlement action |
 | --- | --- | --- | --- |
-| 1 | `InvalidSignature` | a party's signature does not recover to the order's user | remove the order (cancel it on the book), never retry |
-| 2 | `InsufficientMargin` | the trade would push an account's available margin below zero | remove the account's orders, block the account until [SVD_Sync] observes recovered equity |
+| 1 | `InvalidSignature` | a party's signature does not recover to the order's user | remove the at-fault order (cancel it on the book); the innocent side's crossed quantity is restored through the pre-trade pipeline — never retry |
+| 2 | `InsufficientMargin` | the trade would push an account's available margin below zero | remove the at-fault account's orders and block it until [SVD_Sync] observes recovered equity; the innocent side's crossed quantity is restored through the pre-trade pipeline |
 | 3 | `OrderFullySettled` | `filledQuantity + tradedQuantity` exceeds the order's total | treat as settled (idempotent double-submission), publish the result |
-| 4 | `OrderExpired` | `timestampMs` + lifetime is in the past | remove the order |
+| 4 | `OrderExpired` | `timestampMs` + lifetime is in the past | remove the expired order; the innocent side's crossed quantity is restored through the pre-trade pipeline |
 | 5 | `SymbolPaused` | the symbol is not accepting settlement | transient: retry with backoff, roll back on deadline |
 | 6 | `SettlementPaused` | the protocol is paused | transient: retry with backoff, roll back on deadline |
-| 7 | `InvalidPrice` | the executed price violates the tick size or the taker's limit | remove the order (off-chain validation bug) |
-| 8 | `InvalidQuantity` | the quantity violates the lot size | remove the order |
+| 7 | `InvalidPrice` | the executed price violates the tick size or the taker's limit | remove the at-fault order (off-chain validation bug); the innocent side's crossed quantity is restored through the pre-trade pipeline |
+| 8 | `InvalidQuantity` | the quantity violates the lot size | remove the at-fault order; the innocent side's crossed quantity is restored through the pre-trade pipeline |
 
 ## settleBatch semantics
 
