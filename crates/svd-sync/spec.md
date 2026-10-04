@@ -7,17 +7,23 @@ the [SVD_PubSub] cluster relays the margin position changes to the subscribed us
 publishes margin state; the [SVD_Settlement] publishes settlement results (its own channel), never
 margin numbers.
 
+The feed carries **final states, not deltas**: every message is the latest margin state of one
+account, the subscribers overwrite their entry for the account and always hold the latest view —
+there are no sequences to manage, no dedup, no snapshot + sequence gap logic. The [SVD_Sync]
+persists the state in two shapes into the [Redis_Cluster]: the pub/sub channel `svd:sync:margin`
+carries the live updates, and a key per account (`svd:sync:margin:{account}`) holds the latest
+state for the on-demand reads — the [SVD_Pretrade] pulls an account's balance from the key on the
+account's first order in a market, so the instances only subscribe to the accounts that trade their
+market (see the pre-trade spec). The per-account keys **are the snapshot**: there is no separate
+snapshot and no sequence bookkeeping, which simplifies the recovery of the [SVD_Sync] itself too.
+
 Unlike the other services, the [SVD_Sync] is **not symbol-scoped**: the margin account of the
 settlement protocol is global, one account trades every symbol against the same equity. The
 [SVD_Sync] watches the [MarginAccount] and [Settlement] contracts (the assumed interfaces in
-doc/settlement-protocol.md) and publishes the account changes to a global channel. One instance
-serves the whole chain; for scale it shards by account address ranges (see the features section).
+doc/settlement-protocol.md). One instance serves the whole chain; for scale it shards by account
+address ranges (see the features section).
 
-The chain watch is asynchronous and reorganizations happen: the [SVD_Sync] buffers the events by
-confirmation depth, journals the applied events to a local log with a checkpoint, and recovers by
-snapshot + replay, mirroring the state recovery design of the [SVD_OMS_Slave].
-
-## The data flow
+# The data flow
 The chain subscriber connects to the [Web3RPCNodes] with an alloy WebSocket provider and subscribes
 to the `MarginAccountUpdated` event of the [MarginAccount] contract (plus `MarginDeposited` /
 `MarginWithdrawn` for the deposit / withdraw detail). The event already carries the complete new
@@ -32,41 +38,49 @@ The events flow through the pipeline:
 2. **The confirmer** — a thread tracks the chain head and promotes the pending events to the
    applier once their block reaches the configured confirmation depth (default 3). The depth is
    the tradeoff: deeper is safer against reorganizations, shallower publishes the margin state
-   sooner; the on-chain margin is the final arbiter either way.
-3. **The applier** — the applier owns the margin cache. For each promoted event it assigns the
-   next journal sequence, applies the delta to the cache, appends the event to the local journal
-   (the journal is the durable log of the applied events), publishes the `MarginChange` to the
-   [Redis_Cluster] channel `svd:sync:margin`, and hands the row to the [SQL_Cluster] writer. The
-   publication carries the sequence, so the subscribers can deduplicate by it.
-4. **The snapshot thread** — every snapshot interval the applier's cache is snapshotted with its
-   current sequence and persisted to the [Redis_Cluster] under `svd:sync:margin:snapshot` (and to
-   the journal). The snapshot bounds the cold start and the recovery of the subscribers and of the
-   [SVD_Sync] itself.
+   sooner; the on-chain margin is the final arbiter either way. The confirmer also publishes the
+   heartbeat on the margin channel every interval, carrying the confirmed block number — the
+   subscribers use it to detect a dead feed.
+3. **The applier** — for each promoted event the applier updates the per-account key
+   `svd:sync:margin:{account}` in the [Redis_Cluster] (the SET of the serialized latest state), and
+   publishes the `MarginChange` to the channel `svd:sync:margin`, then hands the row to the
+   [SQL_Cluster] writer. The publishes are idempotent by nature: the same final state published
+   twice is harmless, the subscribers just overwrite twice.
+4. **The watermark** — the applied `(block, log index)` is persisted to the local journal (the
+   same memory-mapped dual header design as the [SVD_OMS_Slave] journal, now with a tiny payload).
+   The watermark is the only thing the [SVD_Sync] needs to recover: the chain is the source of
+   truth, the per-account keys are the snapshot, so there is no snapshot thread and no sequence.
 5. **The SQL writer** — a side thread batches the margin rows into upserts of the
    `margin_accounts` table (account, equity, used margin, available margin, block, updated at).
 
 A reorganization is detected by the confirmer: the tracked block hash at the confirmation depth
-does not match the canonical chain anymore. The [SVD_Sync] then rolls the state back — it
-invalidates the applied events of the dropped blocks from the cache, rewinds the journal to the
-checkpoint of the first dropped block, and replays the chain's replacement blocks (fetched via
-`eth_getLogs` on the RPC). The rollback is rare and off the hot loop; the margin cache is small (one
-entry per account), so the rewind is cheap.
+does not match the canonical chain anymore. The events of the dropped blocks name the affected
+accounts; the [SVD_Sync] re-reads their state from the chain (the contract views at the current
+head) and republishes the correct final states — the final-state semantics make the correction a
+plain republish, no rollback ledger is needed.
 
-## Ingress Message and Outgress Message
+# Ingress Message and Outgress Message
 The ingress is the chain itself — the contract events of doc/settlement-protocol.md, decoded with
-alloy. The outgress is the `MarginChange` message published to the [Redis_Cluster] (MessagePack on
-the wire, rmp-serde), to be defined in crates/primitives/src/message/margin.rs:
+alloy. The outgress is the margin feed published to the [Redis_Cluster] (MessagePack on the wire,
+rmp-serde), defined in crates/primitives/src/message/margin.rs:
 
 ```Rust
-/// The margin state delta of one account, published by [SVD_Sync] to the
-/// [Redis_Cluster] channel `svd:sync:margin`. The [SVD_Pretrade] instances of
-/// every symbol subscribe to the channel and apply the deltas to their local
-/// margin caches; the [SVD_PubSub] cluster relays them to the users.
+/// The messages on the `svd:sync:margin` channel, published by [SVD_Sync].
+/// The channel is global (not per symbol): the margin account of the
+/// settlement protocol backs every market, and the subscribers keep their
+/// own subsets of it.
+pub enum MarginMsg {
+    /// The latest margin state of one account — a final state, not a delta.
+    /// The subscribers overwrite their entry for the account; the last
+    /// message wins, so a republished state is harmless.
+    Update(MarginChange),
+    /// A periodic heartbeat carrying the confirmed block number; the
+    /// subscribers use it to detect a dead feed.
+    Heartbeat { block: u64 },
+}
+
+/// The latest margin state of one account.
 pub struct MarginChange {
-    /// The monotonic sequence assigned by the [SVD_Sync] journal. The
-    /// subscribers apply a delta only once by the sequence, and drop the
-    /// older ones (at-least-once delivery of the channel).
-    pub seq: u64,
     /// The account of the settlement protocol.
     pub account: Address,
     /// The equity of the account, quote asset units.
@@ -80,56 +94,60 @@ pub struct MarginChange {
 }
 ```
 
-The journal entry of the applied event carries the same payload plus the block hash and the log
-index, so the checkpoint (block, log index, sequence) is enough to rewind and replay.
+The same state is persisted under the per-account key `svd:sync:margin:{account}` (the account
+serialized as a hex address), which is the on-demand read path of the subscribers.
 
-## The dependency of svd-sync crate
-- alloy: the EVM transport (WebSocket subscription, `eth_getLogs` polling fallback) and the ABI
-  decoding of the contract events — the workspace already pins alloy for chain interop.
-- primitives: the address and value types of crates/primitives, and the `MarginChange` message
-  defined there.
-- storage: the [Redis_Cluster] helpers of crates/storage for the change channel and the snapshot
-  key (the publish side only — the [SVD_Sync] produces, it never subscribes).
-- journal: the local journal is the same design as the [SVD_OMS_Slave] journal in crates/svd-oms
+# The dependency of svd-sync crate
+- alloy: the EVM transport (WebSocket subscription, `eth_getLogs` polling fallback), the ABI
+  decoding of the contract events and the state reads for the reorg correction — the workspace
+  already pins alloy for chain interop.
+- primitives: the address and value types of crates/primitives, and the `MarginMsg` /
+  `MarginChange` messages defined there.
+- storage: the [Redis_Cluster] helpers of crates/storage for the change channel and the per-account
+  state keys (the publish side only — the [SVD_Sync] produces, it never subscribes). The storage
+  crate gains a keyed store helper beside the channel publish (the SET / GET of the per-account
+  keys).
+- journal: the watermark journal is the same design as the [SVD_OMS_Slave] journal in crates/svd-oms
   (memory-mapped file, dual header metadata for the corruption detection, flushed touched ranges).
   The implementation should be extracted into a shared crate (the storage crate is the natural
   home) so both services maintain one copy of the format.
 - net: the RPC helper bits of crates/net (endpoint failover, keepalive).
 
-## The concurrency model of svd-sync crate
+# The concurrency model of svd-sync crate
 - **Chain subscriber thread** (1, async): the alloy WebSocket subscription, decodes the logs and
   pushes them into the pending buffer.
 - **Confirmer thread** (1, async): tracks the head, promotes the confirmed events to the applier,
-  detects the reorganizations and drives the rollback.
-- **Applier thread** (1, pinned optional): owns the margin cache and the journal; applies the
-  promoted events, appends the journal, publishes the [Redis_Cluster] channel and hands the rows to
-  the SQL writer. The [Redis_Cluster] publish is a side-path I/O, it may block — the applier is not
-  on any hot path, but a slow publication must not stall the chain watch, so the applier's inbox is
-  an unbounded queue the confirmer never blocks on.
-- **Snapshot thread** (1): snapshots the cache on the configured cadence and persists it to the
-  journal and the [Redis_Cluster].
+  publishes the heartbeat on the margin channel, and detects the reorganizations with the
+  correction described above.
+- **Applier thread** (1, pinned optional): applies the promoted events — the per-account key SET,
+  the channel publish and the watermark journal — and hands the rows to the SQL writer. The
+  [Redis_Cluster] publishes are side-path I/O, they may block — the applier is not on any hot path,
+  but a slow publication must not stall the chain watch, so the applier's inbox is an unbounded
+  queue the confirmer never blocks on.
 - **SQL writer thread** (1): batches the margin rows into upserts with retries.
 
-## The features in svd-sync crate
+# The features in svd-sync crate
 - config: a TOML config loaded on start and reloadable via SIGHUP, holding the RPC endpoints
   (WebSocket + HTTPS), the contract addresses, the start block, the confirmation depth, the
-  snapshot interval, the journal path, the [Redis_Cluster] and [SQL_Cluster] connections, and the
+  heartbeat interval, the journal path, the [Redis_Cluster] and [SQL_Cluster] connections, and the
   shard of the instance (an account range). The contract address and the start block are
   reloadable to move the watch point.
 - event decoding: the alloy ABI decoding of `MarginAccountUpdated`, `MarginDeposited` and
   `MarginWithdrawn`, with the tolerance for the unknown topics (the protocol is not frozen — a new
   event is skipped and logged, never a crash).
 - the confirmation pipeline: the pending buffer, the confirmation depth, and the reorg detection
-  with the rollback described above.
-- the journal: the applied events with the (block, log index, sequence) checkpoint, the same dual
-  header corruption handling as the [SVD_OMS_Slave] journal.
-- snapshot + recovery: on restart the [SVD_Sync] loads the latest snapshot from the journal (or the
-  [Redis_Cluster]), replays the journal entries newer than the snapshot sequence, then continues
-  the chain watch from the last applied block plus one. The replay is deterministic — the events
-  are applied by their order again.
+  with the chain-state correction described above.
+- the watermark journal: the applied (block, log index) checkpoint, the same dual header corruption
+  handling as the [SVD_OMS_Slave] journal. On restart the [SVD_Sync] reads the watermark, re-fetches
+  the events from the watermark block (`eth_getLogs` — the chain is the source of truth) and
+  re-applies them: republishing the same final states is idempotent, so the crash window loses
+  nothing.
+- the per-account persistence: the `svd:sync:margin:{account}` keys — the snapshot of the system —
+  and the `svd:sync:margin` channel with the heartbeat.
 - the sharding: when one instance is not enough, the [SVD_Sync] shards by account address range
   (address mod N). Every shard publishes to its own channel `svd:sync:margin:{shard}` and keeps its
-  own snapshot; the subscribers (the [SVD_Pretrade] instances) subscribe to all the shard channels
-  and merge the feeds. A single instance is the default and needs no shard config.
+  own watermark; the per-account keys stay the global keys of the cluster. The subscribers (the
+  [SVD_Pretrade] instances) subscribe to all the shard channels. A single instance is the default
+  and needs no shard config.
 - the SQL writer: the batched upserts of the `margin_accounts` table with the retry and the
   backoff, so the [SQL_Cluster] outage never stalls the [Redis_Cluster] publications.
