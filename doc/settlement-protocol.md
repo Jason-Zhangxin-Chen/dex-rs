@@ -207,10 +207,12 @@ the failing half.
 
 - **Order admission** — orders never enter the chain; the chain sees a trade
   only after the off-chain engine matched it. The contract has no order book.
-- **Resting-order margin reservation** — reservations are computed off-chain
-  by [SVD_Pretrade] (see its spec); the contract enforces the final margin at
-  settlement time. This is why [SVD_Pretrade]'s check is conservative and the
-  settlement result is the correction mechanism.
+- **Off-chain margin checks** — [SVD_Pretrade] checks the orders against the
+  latest synced margin state without off-chain reservations (a reservation
+  mechanism may be added later): the sync window tolerates over-subscription,
+  the contract enforces the final margin at settlement time, and the trades
+  that cannot settle are removed from the book with the account blocked until
+  fresh margin state arrives.
 - **Gas batching policy, nonce management, reorg handling** — those belong to
   [SVD_Settlement].
 - **Deposit / withdraw flows** (KYC, withdrawal delays, oracles) — only the

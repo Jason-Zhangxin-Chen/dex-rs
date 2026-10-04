@@ -8,13 +8,17 @@ the orders (they must never trade again — forged signature, exhausted margin, 
 transient failures are retried with a deadline, and when the retries are exhausted the [SVD_Settlement]
 **rolls the trades back — it puts the failed trades' orders back into the book** through a reversal
 message to the [SVD_OMS_Master]. Every result is published to the [Redis_Cluster] and the
-[SQL_Cluster], because the downstream services depend on it: the [SVD_Pretrade] releases the margin
-reservations from the results, the [SVD_PubSub] relays the settlement status to the users, and the
-[SVD_Sync] picks up the authoritative margin changes from the chain events the settlement produced.
+[SQL_Cluster], because the downstream services depend on it: the [SVD_Pretrade] consumes the results
+to block the accounts of the failed trades (a reverted batch means the on-chain margin is exhausted
+while the cached margin state may still be stale), the [SVD_PubSub] relays the settlement status to
+the users, and the [SVD_Sync] picks up the authoritative margin changes from the chain events the
+settlement produced.
 
 The submission is the slow I/O of the system (transaction building, gas estimation, mempool,
 confirmations), so everything after the trade queue is asynchronous — the [HotPath] ends at the
-queue drain and the journal append, which never block.
+queue drain and the journal append, which never block and never allocate: the core thread follows
+the same **no allocation rule** as the [SVD_OMS_Master] core thread (see the hot path discipline
+section).
 
 ## The data flow
 The [SVD_OMS_Master] pushes the `Trade` events into the file mapped share memory SPSC queue (the
@@ -47,9 +51,9 @@ of the [SVD_Settlement] spins on the queue:
 
 | outcome | condition | action |
 | --- | --- | --- |
-| mined & confirmed | the batch settled | publish `Settled`, release the margin reservations through the result, write the SQL rows |
+| mined & confirmed | the batch settled | publish `Settled`, write the SQL rows |
 | `SettlementError` code 1 `InvalidSignature` | a party's signature does not recover | the order is forged: send `CancelOrder` to the master (remove the order's resting remainder), publish the result — never retry |
-| code 2 `InsufficientMargin` | an account's available margin is exhausted on-chain | the account must not trade: send `MassCancelByUser` to the master (all its resting orders leave the book), publish the result — the [SVD_Pretrade] blocks the account until the [SVD_Sync] margin feed observes the recovered equity |
+| code 2 `InsufficientMargin` | an account's available margin is exhausted on-chain | the account must not trade: send `MassCancelByUser` to the master (all its resting orders leave the book), publish the result — the [SVD_Pretrade] blocks the account until a fresh margin update arrives for it (any fresh state clears the block and decides the admission on its own from then on) |
 | code 3 `OrderFullySettled` | the trade was already settled (double submission) | treat as settled: publish `Settled` — the idempotent path |
 | code 4 `OrderExpired` | the order's lifetime passed | send `CancelOrder` to the master, publish the result |
 | code 5 / 6 `SymbolPaused` / `SettlementPaused` | the protocol is not accepting | transient: retry the batch with backoff; roll back on the deadline |
@@ -97,8 +101,10 @@ pub enum SettlementMsg {
 /// [Redis_Cluster] channel `svd:stl:{symbol_hex}:settlements`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettlementResult {
-    /// The batch sequence of the settlement journal; the subscribers apply
-    /// each result once by this watermark.
+    /// The batch sequence of the settlement journal — the sequence of the
+    /// [SVD_Settlement]'s own at-most-once publication; the consumers (the
+    /// [SVD_Pretrade] among them) do not bookkeep it: applying a result is
+    /// idempotent (setting a block twice is a no-op).
     pub batch_seq: u64,
     /// The symbol of the batch.
     pub symbol: Symbol,
@@ -108,8 +114,8 @@ pub struct SettlementResult {
     pub tx_hash: Option<Hash32>,
     /// The block number when the transaction was confirmed.
     pub block: Option<u64>,
-    /// The trades of the batch — the [SVD_Pretrade] computes the released
-    /// reservations from them.
+    /// The trades of the batch — the [SVD_Pretrade] derives the accounts to
+    /// block from them when the outcome is a reverted batch.
     pub trades: Vec<Trade>,
 }
 
@@ -196,8 +202,9 @@ removals above.
 
 ## The concurrency model of svd-settlement crate
 - **Core thread** (1, pinned): spins on the trade SPSC queue, drains the trades, appends them to
-  the journal and hands them to the submitter. Nothing else — the hot path ends here, the queue
-  drain and the journal append never block.
+  the journal and hands them to the submitter. Nothing else — the hot path ends here; the queue
+  drain runs in a pre-allocated batch buffer reused every iteration, the journal append is
+  memory-mapped, and the hand-off uses pooled buffers (see the hot path discipline section).
 - **Submitter thread** (1, async tokio + alloy): the batch assembly, the submission, the
   monitoring, the classification and the reversal decisions; it pushes the reversal messages into
   the reversal SPSC queue and the results to the storage publisher.
@@ -207,13 +214,36 @@ removals above.
 - **SQL writer thread** (1): batches the settled trades and the settlement rows into the
   [SQL_Cluster] with retries; an SQL outage never stalls the [Redis_Cluster] publication.
 
+## The hot path discipline
+The core thread follows the same **no allocation rule** as the [SVD_OMS_Master] core thread: **no
+heap allocation and no blocking call at runtime**. The [HotPath] ends at this thread, and
+everything past it (the submission, the monitoring, the publication) is side-path work:
+
+- **The trade batch** — the buffer the core loop drains the SPSC queue into is allocated once at
+  startup with the configured batch size and reused every iteration, the same pattern as the
+  master's spin loop batch.
+- **The journal append** — the journal is memory-mapped: the append copies the trade payload into
+  the mapped pages and flushes only the touched ranges, so it performs no heap allocation and no
+  read / write syscalls (the same journal design as the [SVD_OMS_Slave]).
+- **The hand-off buffers** — the drained batches travel to the submitter in buffers checked out
+  from the object pools of the cache crate (the same pooling as the primitives `PooledTrades`),
+  sized to the configured worst case so a steady-state checkout never allocates; the submitter
+  returns the buffers to the pools after the batch is encoded, so the core thread hands the work
+  off without allocating.
+- **The batch state machine** — the core thread journals only the received trades; the batch state
+  transitions are appended by the submitter thread, off the hot path.
+
+Everything that is allowed to allocate or block — the ABI encoding, the gas estimation, the
+signing, the RPC I/O, the result serialization — runs on the submitter, the storage publisher and
+the SQL writer threads, never on the core thread.
+
 ## The features in svd-settlement crate
 - config: a TOML config loaded on start and reloadable via SIGHUP, holding the symbol, the core
   id, the trade SPSC queue (path, capacity, create), the reversal SPSC queue, the chain
   connections (RPC pool, chain id, the settlement contract address), the operator key, the
-  batching (max trades, window), the retry policy (max retries, backoff, the rollback deadline),
-  the confirmation depth, the gas strategy, the journal path, and the [Redis_Cluster] /
-  [SQL_Cluster] connections.
+  batching (max trades, window) and the hand-off pool sizes, the retry policy (max retries,
+  backoff, the rollback deadline), the confirmation depth, the gas strategy, the journal path, and
+  the [Redis_Cluster] / [SQL_Cluster] connections.
 - the journaled state machine: the trade log and the batch states with the crash replay described
   above.
 - the batch builder: the aggregation of the trades into the `settleBatch` calls within the gas
@@ -224,4 +254,6 @@ removals above.
   classification section, with the binary-split isolation of the failing trades.
 - the reversal engine: the `SettlementMsg` composition (one `RestoreOrder` per failed trade) and
   the at-most-once delivery through the journaled state machine.
-- the result publisher: the `SettlementResult` publication with the batch sequence watermark.
+- the result publisher: the `SettlementResult` publication with the batch sequence of the
+  settlement journal (the consumers apply a result idempotently — the [SVD_Pretrade] blocks the
+  accounts of a reverted batch, and setting the block twice is a no-op).
