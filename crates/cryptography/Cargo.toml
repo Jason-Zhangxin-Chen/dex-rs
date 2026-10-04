@@ -3,4 +3,8 @@ name = "cryptography"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
+
 [dependencies]
+primitives = { version = "0.1.0", path = "../primitives" }
+k256 = { workspace = true }
+sha3 = { workspace = true }
