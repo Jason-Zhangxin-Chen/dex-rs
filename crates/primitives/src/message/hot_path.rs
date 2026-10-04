@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 /// Messages sent from user end. It is forwarded to [`SVD_OMS_Master`] from ['SVD_Pretrade']for
 /// processing via share memory SPSC queue. The messages are fixed sized for preallocation
 /// in share memory.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrderMsg {
     /// New Order.
     NewOrder(Order),
@@ -20,7 +20,7 @@ pub enum OrderMsg {
 }
 
 /// CancelOrder defines the data required for cancelling an order.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CancelOrder {
     /// The symbol.
     symbol: Symbol,
@@ -57,6 +57,26 @@ impl CancelOrder {
     /// The nonce of the order to be cancelled.
     pub fn nonce(&self) -> Nonce {
         self.nonce
+    }
+
+    /// The symbol of the order to be canceled.
+    pub fn symbol(&self) -> Symbol {
+        self.symbol
+    }
+
+    /// The id of the order to be canceled.
+    pub fn order_id(&self) -> Hash32 {
+        self.order_id
+    }
+
+    /// When the cancel operation is created.
+    pub fn timestamp(&self) -> TimestampMs {
+        self.timestamp
+    }
+
+    /// The signature of the operation.
+    pub fn signature(&self) -> Signature {
+        self.signature
     }
 
     /// Sets the symbol of the order to be canceled.
@@ -150,5 +170,80 @@ impl Trade {
     pub fn with_traded_quantity(mut self, traded_quantity: Quantity) -> Self {
         self.traded_quantity = traded_quantity;
         self
+    }
+}
+
+/// The messages of the pipeline between [`SVD_Pretrade`] and
+/// [`SVD_OMS_Master`]: the validated user requests and the settlement-driven
+/// restores. Fixed sized for preallocation in the share memory queues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PipelineMsg {
+    /// A user request (new order / cancel), validated by a handler thread.
+    User(OrderMsg),
+    /// Re-injects the crossed quantity of an innocent side: the trade failed
+    /// to settle because of the other side, so this order's consumed
+    /// quantity re-enters the book. The [`SVD_OMS_Master`] applies the same
+    /// merge semantics as a rollback restore.
+    RestoreOrder {
+        /// The order of the innocent side, as it was in the failed trade.
+        order: Order,
+        /// The crossed quantity of the failed trade to re-insert.
+        quantity: Quantity,
+    },
+}
+
+#[cfg(test)]
+mod pipeline_tests {
+    use super::*;
+    use crate::base::{Nonce, Side};
+    use crate::order::{OrderCold, OrderColdCommon, OrderHot, OrderKind};
+    use crate::time_in_force::TimeInForce;
+    use rmp_serde::{from_slice, to_vec};
+
+    fn order(user: u8, nonce: u64) -> Order {
+        Order::new(
+            OrderHot {
+                user: Address([user; 20]),
+                nonce: Nonce(nonce),
+                price: Price(100),
+                quantity: Quantity(10),
+                time_in_force: TimeInForce::Gtc,
+                side: Side::Buy,
+            },
+            OrderCold::new(
+                OrderColdCommon::new(
+                    Hash32([0; 32]),
+                    Symbol([0; 32]),
+                    Signature::default(),
+                    TimestampMs(0),
+                ),
+                OrderKind::Standard,
+            ),
+        )
+    }
+
+    #[test]
+    fn test_pipeline_msg_user_roundtrip() {
+        let msg = PipelineMsg::User(OrderMsg::NewOrder(order(1, 1)));
+        let bytes = to_vec(&msg).unwrap();
+        let restored: PipelineMsg = from_slice(&bytes).unwrap();
+        assert_eq!(msg, restored);
+    }
+
+    #[test]
+    fn test_pipeline_msg_restore_roundtrip() {
+        let msg = PipelineMsg::RestoreOrder { order: order(1, 1), quantity: Quantity(7) };
+        let bytes = to_vec(&msg).unwrap();
+        let restored: PipelineMsg = from_slice(&bytes).unwrap();
+        assert_eq!(msg, restored);
+    }
+
+    #[test]
+    fn test_pipeline_msg_variants_are_distinct() {
+        let user = to_vec(&PipelineMsg::User(OrderMsg::NewOrder(order(1, 1)))).unwrap();
+        let restore =
+            to_vec(&PipelineMsg::RestoreOrder { order: order(1, 1), quantity: Quantity(7) })
+                .unwrap();
+        assert_ne!(user, restore);
     }
 }

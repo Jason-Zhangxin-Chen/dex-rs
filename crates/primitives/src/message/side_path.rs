@@ -77,6 +77,14 @@ pub enum OrderStatus {
         /// Filled quantity.
         filled_quantity: Quantity,
     },
+    /// Quantity was restored into the resting order: a trade the order took
+    /// part in failed to settle because of the other side, so the crossed
+    /// quantity re-entered the book (a merge into the resting order). The
+    /// carried quantity is the restored amount.
+    Restored {
+        /// The restored quantity.
+        quantity: Quantity,
+    },
     /// The order is off from the book, nothing remaining.
     Filled {
         /// Filled quantity.
@@ -134,6 +142,10 @@ pub enum CancelReason {
     MassCancelByPriceRange,
     /// IOC or FOK order could not be fully filled.
     InsufficientLiquidity,
+    /// Removed by the settlement service: the order's trade failed to settle
+    /// on-chain for a deterministic reason (forged signature, expired order,
+    /// exhausted margin).
+    SettlementFailed,
 }
 
 /// Closed taxonomy of reasons an order may be rejected at admission.
@@ -174,6 +186,12 @@ pub enum RejectReason {
     /// would exhaust a non-auto-replenishing reserve's visible tranche and
     /// discard its hidden remainder (#230).
     ReserveResidualWouldBeDiscarded = 14,
+    /// The on-chain margin state of the account cannot cover the order (the
+    /// SVD_Pretrade margin gate).
+    InsufficientMargin = 15,
+    /// No margin state is available for the account (a failed pull or a
+    /// stale margin feed).
+    MarginStateUnavailable = 16,
     /// Caller-supplied / unmapped code. The library never emits this
     /// variant; it exists so applications can ferry their own reject
     /// codes through the same channel without forking the enum.

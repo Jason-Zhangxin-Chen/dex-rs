@@ -175,6 +175,26 @@ impl RiskState {
         counters.open_count -= 1;
         counters.resting_notional -= u128::from(entry.price.0) * u128::from(entry.remaining_qty.0);
     }
+
+    /// Records quantity restored into a resting order (a trade of the order
+    /// failed to settle because of the other side): the order's risk entry
+    /// and the account's resting notional grow by the restored amount.
+    pub fn record_restored(
+        &mut self,
+        account: Address,
+        nonce: Nonce,
+        price: Price,
+        quantity: Quantity,
+    ) {
+        if !self.enabled() {
+            return;
+        }
+        if let Some(entry) = self.orders.get_mut(&(account, nonce)) {
+            entry.remaining_qty = Quantity(entry.remaining_qty.0 + quantity.0);
+            let counters = self.counters.entry(account).or_default();
+            counters.resting_notional += u128::from(price.0) * u128::from(quantity.0);
+        }
+    }
 }
 
 #[cfg(test)]

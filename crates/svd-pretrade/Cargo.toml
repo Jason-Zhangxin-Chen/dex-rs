@@ -3,4 +3,23 @@ name = "svd-pretrade"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
+
 [dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+rmp-serde = { workspace = true }
+tokio = { workspace = true }
+futures-util = { workspace = true }
+toml = { workspace = true }
+signal-hook = { workspace = true }
+core_affinity = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+crossbeam-queue = { workspace = true }
+axum = { workspace = true }
+rustc-hash = { workspace = true }
+redis = { workspace = true }
+primitives = { version = "0.1.0", path = "../primitives" }
+ipc = { version = "0.1.0", path = "../ipc" }
+storage = { version = "0.1.0", path = "../storage" }
+cryptography = { version = "0.1.0", path = "../cryptography" }

@@ -187,6 +187,16 @@ impl OrderColdCommon {
     pub fn timestamp(&self) -> TimestampMs {
         self.timestamp
     }
+
+    /// The symbol of the order.
+    pub fn symbol(&self) -> Symbol {
+        self.symbol
+    }
+
+    /// The signature of the order.
+    pub fn signature(&self) -> Signature {
+        self.signature
+    }
 }
 
 impl OrderCold {

@@ -205,6 +205,36 @@ impl PriceLevel {
         }
     }
 
+    /// Adds restored quantity to a resting order (a trade of the order failed
+    /// to settle because of the other side): the visible part grows the
+    /// node's visible quantity, the hidden part grows its hidden reserve,
+    /// and both fold into the level totals.
+    pub(crate) fn restore_quantity(
+        &mut self,
+        arena: &mut Slab<OrderNode>,
+        idx: OrderIdx,
+        visible: Quantity,
+        hidden: Quantity,
+    ) {
+        {
+            let node = arena.get_mut(idx as usize).expect("queued order exists in the arena");
+            node.hot.quantity.0 += visible.0;
+            if hidden.0 > 0 {
+                match &mut node.cold.kind {
+                    OrderKind::Iceberg { hidden_quantity }
+                    | OrderKind::ReserveOrder { hidden_quantity, .. } => {
+                        hidden_quantity.0 += hidden.0;
+                    }
+                    _ => {
+                        debug_assert!(false, "a hidden restore only applies to a reserve kind");
+                    }
+                }
+            }
+        }
+        self.visible_quantity.0 += visible.0;
+        self.hidden_quantity.0 += hidden.0;
+    }
+
     /// Records an order added to the level in the level statistics; a no-op
     /// when the statistics are disabled (OMS master).
     pub(crate) fn stats_record_added(&mut self) {

@@ -7,7 +7,7 @@
 
 pub mod redis_store;
 
-pub use redis_store::{RedisConfig, RedisStore};
+pub use redis_store::{RedisConfig, RedisKeyStore, RedisStore};
 
 use std::error::Error;
 use std::fmt;
