@@ -1,9 +1,10 @@
 //! The OMS master: the hot path of the system.
 //!
 //! Three threads: the pinned core thread spins on the ingress SPSC queue
-//! from SVD_Pretrade and executes the requests on the book; the NATS
-//! publisher thread serializes and publishes the replication messages; the
-//! settlement writer thread pushes the trade events into the SPSC queue
+//! from SVD_Pretrade and executes the requests on the book (the user
+//! requests and the settlement-driven restores of the `PipelineMsg`); the
+//! NATS publisher thread serializes and publishes the replication messages;
+//! the settlement writer thread pushes the trade events into the SPSC queue
 //! wired to SVD_Settlement. The fanout closures only hand the pooled
 //! buffers to the I/O threads through unbounded channels, so the core
 //! thread never allocates and never blocks on the fanout I/O.
@@ -14,7 +15,7 @@ use std::time::Duration;
 
 use async_nats::jetstream;
 use ipc::mmap_spsc::SpscQueue;
-use primitives::message::hot_path::{CancelOrder, OrderMsg, Trade};
+use primitives::message::hot_path::{CancelOrder, OrderMsg, PipelineMsg, Trade};
 use primitives::orderbook::book::OrderBook;
 use primitives::orderbook::listener::{Listeners, PooledReplicationMsg, PooledTrades};
 use tracing::{error, info, warn};
@@ -64,8 +65,11 @@ pub fn run(
     );
 
     // The ingress queue wired from SVD_Pretrade.
-    let ingress =
-        SpscQueue::<OrderMsg>::open(&oms.ingress.path, oms.ingress.capacity, oms.ingress.create)?;
+    let ingress = SpscQueue::<PipelineMsg>::open(
+        &oms.ingress.path,
+        oms.ingress.capacity,
+        oms.ingress.create,
+    )?;
 
     spin(book, ingress, oms.batch_size, shutdown);
     Ok(())
@@ -76,12 +80,15 @@ pub fn run(
 /// hot path performs no allocations and no blocking calls.
 fn spin(
     mut book: OrderBook,
-    mut ingress: SpscQueue<OrderMsg>,
+    mut ingress: SpscQueue<PipelineMsg>,
     batch_size: usize,
     shutdown: Arc<AtomicBool>,
 ) {
+    // todo: refine this heap allocation with memory pool.
     let mut batch = Vec::with_capacity(batch_size);
-    batch.resize_with(batch_size, || OrderMsg::CancelOrder(CancelOrder::default()));
+    batch.resize_with(batch_size, || {
+        PipelineMsg::User(OrderMsg::CancelOrder(CancelOrder::default()))
+    });
     let mut empty_spins = 0u32;
     info!("the master core loop started");
     loop {
@@ -90,7 +97,14 @@ fn spin(
         }
         let n = ingress.pop_batch(&mut batch);
         for msg in &batch[..n] {
-            book.execute(msg).expect("the book execution is infallible");
+            match msg {
+                PipelineMsg::User(request) => {
+                    book.execute(request).expect("the book execution is infallible")
+                }
+                PipelineMsg::RestoreOrder { order, quantity } => {
+                    book.restore_order(order, *quantity)
+                }
+            }
         }
         if n == 0 {
             std::hint::spin_loop();
@@ -265,9 +279,9 @@ mod tests {
             }
             Guard(path.clone())
         };
-        let mut ingress = SpscQueue::<OrderMsg>::open(&path, 64, true).unwrap();
-        ingress.push(OrderMsg::NewOrder(order(1, 1, Side::Buy))).unwrap();
-        ingress.push(OrderMsg::NewOrder(order(1, 2, Side::Buy))).unwrap();
+        let mut ingress = SpscQueue::<PipelineMsg>::open(&path, 64, true).unwrap();
+        ingress.push(PipelineMsg::User(OrderMsg::NewOrder(order(1, 1, Side::Buy)))).unwrap();
+        ingress.push(PipelineMsg::User(OrderMsg::NewOrder(order(1, 2, Side::Buy)))).unwrap();
         drop(ingress);
         // The book captures the executed orders through the listener. The
         // book lives on the spawned thread only (mirroring the core thread
@@ -278,7 +292,7 @@ mod tests {
         let spin_shutdown = Arc::clone(&shutdown);
         let spin_path = path.clone();
         let handle = std::thread::spawn(move || {
-            let ingress = SpscQueue::<OrderMsg>::open(&spin_path, 64, false).unwrap();
+            let ingress = SpscQueue::<PipelineMsg>::open(&spin_path, 64, false).unwrap();
             let book = OrderBook::new(BookConfig::default()).with_listeners(
                 Listeners::default().with_book_state_listener(Box::new(move |msg| {
                     counter.fetch_add(msg.len(), Ordering::Relaxed);

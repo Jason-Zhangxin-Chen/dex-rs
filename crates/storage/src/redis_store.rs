@@ -53,7 +53,6 @@ fn default_pool_size() -> usize {
 /// the factory, up to `size` in total (idle plus checked out); a checkout
 /// beyond the limit blocks until a connection returns. The pool is cheap to
 /// clone: the clones share the same connections and accounting.
-#[derive(Clone)]
 pub(crate) struct ConnectionPool<C> {
     /// Creates a new connection.
     factory: Arc<dyn Fn() -> redis::RedisResult<C> + Send + Sync + 'static>,
@@ -61,6 +60,16 @@ pub(crate) struct ConnectionPool<C> {
     size: usize,
     /// The state shared by the clones.
     shared: Arc<Shared<C>>,
+}
+
+impl<C> Clone for ConnectionPool<C> {
+    fn clone(&self) -> Self {
+        Self {
+            factory: Arc::clone(&self.factory),
+            size: self.size,
+            shared: Arc::clone(&self.shared),
+        }
+    }
 }
 
 /// The state shared by the pool's clones.
@@ -219,6 +228,60 @@ impl ChangeSink for RedisStore {
         let value =
             redis::cmd("GET").arg(&self.snapshot_key).query::<Option<Vec<u8>>>(&mut *conn)?;
         Ok(value)
+    }
+}
+
+/// A synchronous Redis cluster store of the keyed states: the latest margin
+/// state of each account lives under its own key, read on demand by the
+/// [SVD_Pretrade] pulls and written by the [SVD_Sync]. The store is cheap to
+/// clone: the clones share the connection pool.
+#[derive(Clone)]
+pub struct RedisKeyStore {
+    /// The pooled cluster connections.
+    pool: ConnectionPool<redis::cluster::ClusterConnection>,
+}
+
+impl RedisKeyStore {
+    /// Connects to the cluster. The connection is lazy: the pool creates
+    /// cluster connections on the first operations.
+    pub fn connect(config: &RedisConfig) -> Result<Self, StorageError> {
+        let client = redis::cluster::ClusterClient::new(config.urls.iter().cloned())?;
+        let pool_size = config.pool_size;
+        let pool = ConnectionPool::new(move || client.get_connection(), pool_size);
+        Ok(Self { pool })
+    }
+
+    /// Reads the value stored under `key`, if any.
+    pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        let mut conn = self.pool.checkout()?;
+        Ok(redis::cmd("GET").arg(key).query::<Option<Vec<u8>>>(&mut *conn)?)
+    }
+
+    /// Stores `value` under `key`.
+    pub fn set(&self, key: &str, value: &[u8]) -> Result<(), StorageError> {
+        let mut conn = self.pool.checkout()?;
+        redis::cmd("SET").arg(key).arg(value).query::<()>(&mut *conn)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod keyed_store_tests {
+    use super::*;
+
+    #[test]
+    fn test_key_store_connect_is_lazy() {
+        // The cluster connection is created on the first operation; opening
+        // the store itself performs no I/O.
+        let store = RedisKeyStore::connect(&RedisConfig::default()).expect("store opens");
+        assert_eq!(store.pool.size, DEFAULT_POOL_SIZE);
+    }
+
+    #[test]
+    fn test_key_store_clones_share_the_pool() {
+        let store = RedisKeyStore::connect(&RedisConfig::default()).expect("store opens");
+        let clone = store.clone();
+        assert!(std::sync::Arc::ptr_eq(&store.pool.shared, &clone.pool.shared));
     }
 }
 

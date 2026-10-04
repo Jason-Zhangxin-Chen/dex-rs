@@ -1,0 +1,59 @@
+# The pre-trade gateway of one symbol's hot path. The user requests are
+# routed here by NGINX on the symbol in the request path.
+
+# The market symbol, hex (`0x…`) or plain ASCII.
+symbol = "BTCUSDC"
+
+# Core id the forwarding thread is pinned to; unset leaves it unpinned.
+core_id = 3
+
+# Max number of messages the forwarding thread pops per batch.
+batch_size = 1024
+
+# Listen address of the HTTP gateway (the NGINX upstream).
+listen_addr = "127.0.0.1:8080"
+
+# Capacity of the shared MPSC queue between the handlers and the
+# forwarding thread.
+mpsc_capacity = 65536
+
+# The ingress SPSC queue wired to the SVD_OMS_Master.
+[ingress]
+path = "/dev/shm/svd_oms.ingress"
+capacity = 65536
+create = false
+
+# The chain parameters of the settlement protocol: the EIP-712 domain the
+# signatures are verified against.
+[chain]
+chain_id = 31337
+verifying_contract = "0x0000000000000000000000000000000000000001"
+
+# The margin gate. Keep the ratio, the fee and the quote-per-tick-lot in
+# lockstep with the on-chain symbol config of the settlement protocol.
+[margin]
+# The margin requirement of an order, in basis points of the notional.
+margin_ratio_bps = 10000
+# The taker fee added to the requirement, in basis points of the notional.
+fee_bps = 10
+# The quote amount one price tick × one lot unit corresponds to.
+quote_per_tick_lot = 1000
+# Whether an order passes the gate when no margin state is available at
+# all (the escape hatch for a bootstrapping market).
+allow_unknown_accounts = false
+# Timeout of the on-demand margin pull, in milliseconds.
+pull_timeout_ms = 1000
+# Stale feed timeout of the kill switch, in milliseconds.
+stale_feed_ms = 5000
+# Bound of the tracked accounts of the local margin cache.
+max_tracked_accounts = 100000
+# Entries idle beyond this window are evicted, in milliseconds.
+idle_evict_ms = 3600000
+# Number of shards of the margin cache.
+shards = 16
+
+# The Redis cluster of the side feeds (the margin channel and the
+# settlement results) and the on-demand margin pulls.
+[redis]
+urls = ["redis://127.0.0.1:6379"]
+pool_size = 4

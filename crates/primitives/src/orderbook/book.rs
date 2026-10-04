@@ -141,6 +141,46 @@ impl OrderBook {
         }
     }
 
+    /// Restores the crossed quantity of an innocent side: a trade the order
+    /// took part in failed to settle because of the other side, so the
+    /// crossed quantity re-enters the book. The quantity is merged into the
+    /// resting order when `(user, nonce)` is still in the book, and the
+    /// order is re-inserted at the tail of its price level when it is gone
+    /// (a re-inserted order loses its original time priority). The restore
+    /// bypasses the kill switch and the admission checks: it re-enters an
+    /// already-admitted state, not new flow. A restore never trades.
+    pub fn restore_order(&mut self, order: &Order, quantity: Quantity) {
+        let mut changes = self.memory_pools.changes_pool.acquire();
+        let (user, nonce) = (order.hot.user, order.hot.nonce);
+        if self.state.index.contains_key(&(user, nonce)) {
+            let idx = *self.state.index.get(&(user, nonce)).expect("the resting order exists");
+            let snapshot: Order = self
+                .state
+                .arena
+                .get(idx as usize)
+                .expect("the resting order exists")
+                .clone()
+                .into();
+            let (visible, hidden) = restored_split(&snapshot, quantity);
+            let levels = match order.hot.side {
+                Side::Buy => &mut self.state.bids,
+                Side::Sell => &mut self.state.asks,
+            };
+            levels
+                .get_mut(&order.hot.price)
+                .expect("a resting order has a price level")
+                .restore_quantity(&mut self.state.arena, idx, visible, hidden);
+            self.state.risk_state.record_restored(user, nonce, order.hot.price, quantity);
+            changes.push(OrderChange::new(snapshot, OrderStatus::Restored { quantity }));
+        } else {
+            let restored_order = restored_fresh(order, quantity);
+            self.rest_order(&restored_order);
+            self.stats_record_added();
+            changes.push(OrderChange::new(restored_order, OrderStatus::Open));
+        }
+        self.listeners.fanout_replication_msg(PooledReplicationMsg::new(changes, None));
+    }
+
     /// Apply is ran by OMS_Slave to apply the deltas replicated from the OMS_Master.
     ///
     /// The order change stream is the complete replication protocol: it encodes
@@ -207,6 +247,33 @@ impl OrderBook {
                     self.rest_order(&remainder);
                     self.stats_record_added();
                     self.stats_record_executed(filled_quantity, order.hot.price);
+                }
+            }
+            OrderStatus::Restored { quantity } => {
+                if resting {
+                    // A merge: add the restored quantity to the resting
+                    // order, mirroring the master's visible / hidden split.
+                    let idx = *self
+                        .state
+                        .index
+                        .get(&(user, nonce))
+                        .expect("a resting order exists in the index");
+                    let (visible, hidden) = restored_split(&order, quantity);
+                    let levels = match order.hot.side {
+                        Side::Buy => &mut self.state.bids,
+                        Side::Sell => &mut self.state.asks,
+                    };
+                    levels
+                        .get_mut(&order.hot.price)
+                        .expect("a resting order has a price level")
+                        .restore_quantity(&mut self.state.arena, idx, visible, hidden);
+                    self.state.risk_state.record_restored(user, nonce, order.hot.price, quantity);
+                } else {
+                    // Defensive: the master merges only into a resting order;
+                    // re-insert the restored quantity as a fresh tranche.
+                    let restored_order = restored_fresh(&order, quantity);
+                    self.rest_order(&restored_order);
+                    self.stats_record_added();
                 }
             }
             OrderStatus::Filled { filled_quantity } => {
@@ -901,6 +968,26 @@ impl OrderBook {
         }
         self.state.risk_state.record_removed(order.hot.user, order.hot.nonce);
     }
+}
+
+/// The restored split of a merge: standard orders restore into the visible
+/// tranche, iceberg / reserve orders into their hidden reserve (their
+/// visible tranche is untouched).
+fn restored_split(order: &Order, quantity: Quantity) -> (Quantity, Quantity) {
+    match order.cold.kind {
+        OrderKind::Iceberg { .. } | OrderKind::ReserveOrder { .. } => (Quantity::ZERO, quantity),
+        _ => (quantity, Quantity::ZERO),
+    }
+}
+
+/// Builds the re-inserted order of a restore: the restored quantity becomes
+/// a fresh visible tranche (the hidden reserve of the original order is gone
+/// with it — its other crosses settled).
+fn restored_fresh(order: &Order, quantity: Quantity) -> Order {
+    let mut restored = *order;
+    restored.hot.quantity = quantity;
+    restored.set_hidden_quantity(Quantity::ZERO);
+    restored
 }
 
 /// Builds a rejected order change.
@@ -2854,6 +2941,138 @@ mod tests {
 
         std::fs::write(&path, &report).expect("write benchmark report");
         path
+    }
+
+    // ---------------------------------------------------------------
+    // Restore (the settlement-driven re-injection of the innocent side)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_restore_order_merges_into_resting_standard() {
+        let captured = Rc::new(RefCell::new(Vec::new()));
+        let capture = Rc::clone(&captured);
+        let mut book = book().with_listeners(Listeners::default().with_book_state_listener(
+            Box::new(move |msg| {
+                capture.borrow_mut().push(ReplicationMsg::new(
+                    msg.iter().cloned().collect(),
+                    msg.last_trade_price(),
+                ));
+            }),
+        ));
+        let maker = sell(2, 2, 100, 50);
+        book.execute_new_order(&maker).unwrap();
+        book.execute_new_order(&buy(1, 1, 100, 5)).unwrap();
+        assert_eq!(book.state.asks.get(&Price(100)).unwrap().visible_quantity(), Quantity(45));
+
+        book.restore_order(&maker, Quantity(5));
+
+        // The crossed quantity merged back into the resting order.
+        let level = book.state.asks.get(&Price(100)).unwrap();
+        assert_eq!(level.visible_quantity(), Quantity(50));
+        assert_eq!(level.len(), 1);
+
+        // The change carries the pre-merge snapshot and the restored amount.
+        let messages = std::mem::take(&mut *captured.borrow_mut());
+        let change = messages
+            .last()
+            .unwrap()
+            .changes
+            .iter()
+            .find(|c| {
+                c.order().hot.user == maker.hot.user && c.order().hot.nonce == maker.hot.nonce
+            })
+            .expect("the restored order change");
+        assert_eq!(*change.status(), OrderStatus::Restored { quantity: Quantity(5) });
+        assert_eq!(change.order().hot.quantity, Quantity(45));
+    }
+
+    #[test]
+    fn test_restore_order_merges_into_resting_iceberg_hidden() {
+        let mut book = book();
+        let maker = build(
+            2,
+            2,
+            100,
+            10,
+            Side::Sell,
+            TimeInForce::Gtc,
+            OrderKind::Iceberg { hidden_quantity: Quantity(20) },
+        );
+        book.execute_new_order(&maker).unwrap();
+        book.execute_new_order(&buy(1, 1, 100, 5)).unwrap();
+        let level = book.state.asks.get(&Price(100)).unwrap();
+        assert_eq!(level.visible_quantity(), Quantity(5));
+        assert_eq!(level.hidden_quantity(), Quantity(20));
+
+        book.restore_order(&maker, Quantity(5));
+
+        // The restored quantity of an iceberg goes into the hidden reserve.
+        let level = book.state.asks.get(&Price(100)).unwrap();
+        assert_eq!(level.visible_quantity(), Quantity(5));
+        assert_eq!(level.hidden_quantity(), Quantity(25));
+    }
+
+    #[test]
+    fn test_restore_order_reinserts_when_gone() {
+        let captured = Rc::new(RefCell::new(Vec::new()));
+        let capture = Rc::clone(&captured);
+        let mut book = book().with_listeners(Listeners::default().with_book_state_listener(
+            Box::new(move |msg| {
+                capture.borrow_mut().push(ReplicationMsg::new(
+                    msg.iter().cloned().collect(),
+                    msg.last_trade_price(),
+                ));
+            }),
+        ));
+        let maker = sell(2, 2, 100, 50);
+        book.execute_new_order(&maker).unwrap();
+        book.execute_new_order(&buy(1, 1, 100, 50)).unwrap();
+        assert!(book.state.asks.is_empty());
+
+        book.restore_order(&maker, Quantity(5));
+
+        // The order re-entered the book at the tail of its price level with
+        // the restored quantity as a fresh visible tranche.
+        let level = book.state.asks.get(&Price(100)).unwrap();
+        assert_eq!(level.visible_quantity(), Quantity(5));
+        assert_eq!(level.len(), 1);
+        let messages = std::mem::take(&mut *captured.borrow_mut());
+        let change = messages
+            .last()
+            .unwrap()
+            .changes
+            .iter()
+            .find(|c| c.order().hot.user == addr(2))
+            .expect("the restored order change");
+        assert_eq!(*change.status(), OrderStatus::Open);
+        assert_eq!(change.order().hot.quantity, Quantity(5));
+    }
+
+    #[test]
+    fn test_restore_order_replicates_to_slave() {
+        let (mut master, mut slave, captured) = replication_pair();
+
+        // A merge restore: the maker still rests with the remainder.
+        let maker = sell(2, 2, 100, 50);
+        master.execute(&OrderMsg::NewOrder(maker)).expect("master executes");
+        master.execute(&OrderMsg::NewOrder(buy(1, 1, 100, 5))).expect("master executes");
+        master.restore_order(&maker, Quantity(5));
+
+        // A re-insert restore: the maker was fully filled, the order is gone.
+        let gone_maker = sell(3, 3, 100, 10);
+        master.execute(&OrderMsg::NewOrder(gone_maker)).expect("master executes");
+        master.execute(&OrderMsg::NewOrder(buy(4, 4, 100, 10))).expect("master executes");
+        master.restore_order(&gone_maker, Quantity(10));
+
+        let messages = std::mem::take(&mut *captured.borrow_mut());
+        for message in &messages {
+            let pooled = PooledReplicationMsg::new(
+                slave.memory_pools.changes_pool.wrap(message.changes.clone()),
+                message.last_trade_price,
+            );
+            slave.apply(&pooled).expect("slave applies");
+        }
+        assert_book_eq(&master.state, &slave.state);
     }
 
     #[test]
