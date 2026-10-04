@@ -9,7 +9,10 @@ margin numbers.
 
 The feed carries **final states, not deltas**: every message is the latest margin state of one
 account, the subscribers overwrite their entry for the account and always hold the latest view —
-there are no sequences to manage, no dedup, no snapshot + sequence gap logic. The [SVD_Sync]
+there are no per-message sequences to manage, no dedup, no snapshot + sequence gap logic. The
+[SVD_Sync] tracks its own publication position by the **block height and the log index** — the
+watermark guard of the data flow section — so the history re-delivered by a delayed [Web3RPCNodes]
+node is dropped, never republished. The [SVD_Sync]
 persists the state in two shapes into the [Redis_Cluster]: the pub/sub channel `svd:sync:margin`
 carries the live updates, and a key per account (`svd:sync:margin:{account}`) holds the latest
 state for the on-demand reads — the [SVD_Pretrade] pulls an account's balance from the key on the
@@ -24,9 +27,15 @@ doc/settlement-protocol.md). One instance serves the whole chain; for scale it s
 address ranges (see the features section).
 
 # The data flow
-The chain subscriber connects to the [Web3RPCNodes] with an alloy WebSocket provider and subscribes
-to the `MarginAccountUpdated` event of the [MarginAccount] contract (plus `MarginDeposited` /
-`MarginWithdrawn` for the deposit / withdraw detail). The event already carries the complete new
+The chain subscriber connects to a **pool of [Web3RPCNodes]** — one primary node and the
+secondaries — with alloy WebSocket providers, and subscribes to the `MarginAccountUpdated` event of
+the [MarginAccount] contract (plus `MarginDeposited` / `MarginWithdrawn` for the deposit / withdraw
+detail) on the primary. When the primary goes off — a connection failure or a head that stalls
+beyond `node_stall_timeout_ms` — the subscriber **fails over** to the next secondary: it
+re-subscribes there, re-fetches the range from the watermark to the secondary's head via
+`eth_getLogs` (the secondary may lag behind the primary's view — the nodes may see the chain at
+different heights due to the delays), and resumes. The re-delivered history is dropped by the
+watermark guard below, the missing range is applied. The event already carries the complete new
 state — equity, used margin, available margin — so one event is enough to rebuild the account's
 state; the [SVD_Sync] never calls back into the chain for a balance on the hot loop, the events are
 the data.
@@ -40,24 +49,35 @@ The events flow through the pipeline:
    the tradeoff: deeper is safer against reorganizations, shallower publishes the margin state
    sooner; the on-chain margin is the final arbiter either way. The confirmer also publishes the
    heartbeat on the margin channel every interval, carrying the confirmed block number — the
-   subscribers use it to detect a dead feed.
+   subscribers use it to detect a dead feed — and it watches the liveness of the node: a stalled
+   head triggers the failover. A secondary that lags behind the watermark is waited for, never
+   rewound: the [SVD_Sync] resumes publishing once the node catches up.
 3. **The applier** — for each promoted event the applier updates the per-account key
    `svd:sync:margin:{account}` in the [Redis_Cluster] (the SET of the serialized latest state), and
    publishes the `MarginChange` to the channel `svd:sync:margin`, then hands the row to the
    [SQL_Cluster] writer. The publishes are idempotent by nature: the same final state published
    twice is harmless, the subscribers just overwrite twice.
-4. **The watermark** — the applied `(block, log index)` is persisted to the local journal (the
-   same memory-mapped dual header design as the [SVD_OMS_Slave] journal, now with a tiny payload).
-   The watermark is the only thing the [SVD_Sync] needs to recover: the chain is the source of
-   truth, the per-account keys are the snapshot, so there is no snapshot thread and no sequence.
+4. **The watermark** — the applied `(block height, log index)` is persisted to the local journal
+   (the same memory-mapped dual header design as the [SVD_OMS_Slave] journal, now with a tiny
+   payload). The watermark is the **publication guard**: an event is applied only when its `(block,
+   log index)` is strictly beyond the watermark — the [SVD_Sync] bases its position on the block
+   height and the log index, so the history re-delivered by a delayed or a switched RPC node (the
+   nodes may have different views of the chain due to the delays) is dropped, never republished.
+   The watermark advances monotonically and never moves backward. The publish happens before the
+   watermark persist: a crash window may repeat the last events, which the final-state semantics
+   absorb. The watermark is the only thing the [SVD_Sync] needs to recover: the chain is the source
+   of truth, the per-account keys are the snapshot, so there is no snapshot thread and no sequence.
 5. **The SQL writer** — a side thread batches the margin rows into upserts of the
    `margin_accounts` table (account, equity, used margin, available margin, block, updated at).
 
 A reorganization is detected by the confirmer: the tracked block hash at the confirmation depth
-does not match the canonical chain anymore. The events of the dropped blocks name the affected
-accounts; the [SVD_Sync] re-reads their state from the chain (the contract views at the current
-head) and republishes the correct final states — the final-state semantics make the correction a
-plain republish, no rollback ledger is needed.
+does not match the canonical chain anymore. A switched node that merely lags does not look like a
+reorganization — its head number is below the tracked head, so the confirmer waits for it to catch
+up and the watermark never rewinds; only a hash mismatch at the tracked depth is one. On a real
+reorganization the events of the dropped blocks name the affected accounts; the [SVD_Sync] re-reads
+their state from the chain (the contract views at the current head) and republishes the correct
+final states — a deliberate correction, exempt from the watermark guard, no rollback ledger is
+needed.
 
 # Ingress Message and Outgress Message
 The ingress is the chain itself — the contract events of doc/settlement-protocol.md, decoded with
@@ -111,14 +131,17 @@ serialized as a hex address), which is the on-demand read path of the subscriber
   (memory-mapped file, dual header metadata for the corruption detection, flushed touched ranges).
   The implementation should be extracted into a shared crate (the storage crate is the natural
   home) so both services maintain one copy of the format.
-- net: the RPC helper bits of crates/net (endpoint failover, keepalive).
+- net: the RPC helper bits of crates/net (the node pool failover, keepalive).
 
 # The concurrency model of svd-sync crate
-- **Chain subscriber thread** (1, async): the alloy WebSocket subscription, decodes the logs and
+- **Chain subscriber thread** (1, async): connects to the primary of the RPC pool with the alloy
+  WebSocket subscription; on a connection failure or a stall it fails over to the next secondary —
+  re-subscribes, re-fetches the lag range from the watermark, and resumes. It decodes the logs and
   pushes them into the pending buffer.
 - **Confirmer thread** (1, async): tracks the head, promotes the confirmed events to the applier,
-  publishes the heartbeat on the margin channel, and detects the reorganizations with the
-  correction described above.
+  publishes the heartbeat on the margin channel, detects the stalled nodes and triggers the
+  failover, waits for a lagging secondary to catch up (the watermark never rewinds), and detects
+  the reorganizations with the correction described above.
 - **Applier thread** (1, pinned optional): applies the promoted events — the per-account key SET,
   the channel publish and the watermark journal — and hands the rows to the SQL writer. The
   [Redis_Cluster] publishes are side-path I/O, they may block — the applier is not on any hot path,
@@ -127,21 +150,29 @@ serialized as a hex address), which is the on-demand read path of the subscriber
 - **SQL writer thread** (1): batches the margin rows into upserts with retries.
 
 # The features in svd-sync crate
-- config: a TOML config loaded on start and reloadable via SIGHUP, holding the RPC endpoints
-  (WebSocket + HTTPS), the contract addresses, the start block, the confirmation depth, the
-  heartbeat interval, the journal path, the [Redis_Cluster] and [SQL_Cluster] connections, and the
-  shard of the instance (an account range). The contract address and the start block are
-  reloadable to move the watch point.
+- config: a TOML config loaded on start and reloadable via SIGHUP, holding the RPC node pool — one
+  primary and the secondaries in the failover order, each with its WebSocket + HTTPS endpoints —
+  the connection and node stall timeouts, the contract addresses, the start block, the
+  confirmation depth, the heartbeat interval, the journal path, the [Redis_Cluster] and
+  [SQL_Cluster] connections, and the shard of the instance (an account range). The contract
+  address and the start block are reloadable to move the watch point.
 - event decoding: the alloy ABI decoding of `MarginAccountUpdated`, `MarginDeposited` and
   `MarginWithdrawn`, with the tolerance for the unknown topics (the protocol is not frozen — a new
   event is skipped and logged, never a crash).
 - the confirmation pipeline: the pending buffer, the confirmation depth, and the reorg detection
   with the chain-state correction described above.
-- the watermark journal: the applied (block, log index) checkpoint, the same dual header corruption
-  handling as the [SVD_OMS_Slave] journal. On restart the [SVD_Sync] reads the watermark, re-fetches
-  the events from the watermark block (`eth_getLogs` — the chain is the source of truth) and
-  re-applies them: republishing the same final states is idempotent, so the crash window loses
-  nothing.
+- the node failover: the RPC pool with one primary and the secondaries, the failover on a
+  connection failure or a stalled head, the lag re-fetch from the watermark and the catch-up wait
+  (the nodes may have different views of the chain due to the delays, the watermark guard absorbs
+  the difference).
+- the watermark journal: the applied (block height, log index) checkpoint — the position the
+  [SVD_Sync] bases its publications on — with the same dual header corruption handling as the
+  [SVD_OMS_Slave] journal. The watermark is the publication guard: an event is applied only when
+  its (block, log index) is strictly beyond it, so the history re-delivered by a delayed or a
+  switched RPC node is dropped, never republished. On restart the [SVD_Sync] reads the watermark,
+  re-fetches the range from the watermark block (`eth_getLogs` — the chain is the source of truth)
+  and applies the events beyond it; the publish happens before the persist, so a crash window may
+  repeat the last events, which the final-state semantics absorb.
 - the per-account persistence: the `svd:sync:margin:{account}` keys — the snapshot of the system —
   and the `svd:sync:margin` channel with the heartbeat.
 - the sharding: when one instance is not enough, the [SVD_Sync] shards by account address range

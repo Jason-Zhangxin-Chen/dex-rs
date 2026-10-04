@@ -9,10 +9,12 @@ transient failures are retried with a deadline, and when the retries are exhaust
 **rolls the trades back — it puts the failed trades' orders back into the book** through a reversal
 message to the [SVD_OMS_Master]. Every result is published to the [Redis_Cluster] and the
 [SQL_Cluster], because the downstream services depend on it: the [SVD_Pretrade] consumes the results
-to block the accounts of the failed trades (a reverted batch means the on-chain margin is exhausted
-while the cached margin state may still be stale), the [SVD_PubSub] relays the settlement status to
-the users, and the [SVD_Sync] picks up the authoritative margin changes from the chain events the
-settlement produced.
+twice — it re-injects the **innocent side's crossed quantity** of a failed trade into the pre-trade
+pipeline (a trade failed because of one side, the innocent counterparty's order goes back into the
+book through the pipeline), and it blocks the at-fault account when the failure is
+`InsufficientMargin` (the on-chain margin is exhausted while the cached margin state may still be
+stale) — the [SVD_PubSub] relays the settlement status to the users, and the [SVD_Sync] picks up
+the authoritative margin changes from the chain events the settlement produced.
 
 The submission is the slow I/O of the system (transaction building, gas estimation, mempool,
 confirmations), so everything after the trade queue is asynchronous — the [HotPath] ends at the
@@ -33,12 +35,14 @@ of the [SVD_Settlement] spins on the queue:
    `max_trades_per_batch` and `batch_window_ms` (both config). A batch becomes a `settleBatch`
    call of the on-chain protocol.
 3. **Submission** — the submitter builds the calldata with alloy (ABI encode of the
-   `MatchedTrade[]`), estimates the gas, signs the transaction with the operator key, and submits
-   it through the nonce manager. The nonce manager holds the operator's transaction sequence,
-   resynchronizes it from the chain on startup, and detects the gaps.
+   `MatchedTrade[]`), estimates the gas, signs the transaction with the operator key (unlocked
+   from the keystore at startup), and submits it through the nonce manager on the primary node of
+   the RPC pool. The nonce manager holds the operator's transaction sequence, resynchronizes it
+   from the chain on startup, and detects the gaps.
 4. **Monitoring** — the submitter watches the transaction: pending in the mempool, mined, or
    reverted. A mined transaction is watched until the configured confirmation depth (default 1);
-   a reorganized transaction returns to the submission step.
+   a reorganized transaction returns to the submission step. A node that goes off switches the
+   watch to the next secondary — the monitoring continues on the new node's view.
 5. **Classification and action** — a reverted transaction carries the `SettlementError(code,
    index)` revert data. The [SVD_Settlement] decodes it and dispatches per the table below; a
    transient failure retries the batch with backoff, a permanent failure removes the orders, and
@@ -52,12 +56,12 @@ of the [SVD_Settlement] spins on the queue:
 | outcome | condition | action |
 | --- | --- | --- |
 | mined & confirmed | the batch settled | publish `Settled`, write the SQL rows |
-| `SettlementError` code 1 `InvalidSignature` | a party's signature does not recover | the order is forged: send `CancelOrder` to the master (remove the order's resting remainder), publish the result — never retry |
-| code 2 `InsufficientMargin` | an account's available margin is exhausted on-chain | the account must not trade: send `MassCancelByUser` to the master (all its resting orders leave the book), publish the result — the [SVD_Pretrade] blocks the account until a fresh margin update arrives for it (any fresh state clears the block and decides the admission on its own from then on) |
+| `SettlementError` code 1 `InvalidSignature` | a party's signature does not recover | the at-fault order is forged: send `CancelOrder` to the master (remove its resting remainder) and publish the result — the [SVD_Pretrade] re-injects the innocent side's crossed quantity into the pipeline; never retry |
+| code 2 `InsufficientMargin` | an account's available margin is exhausted on-chain | the at-fault account must not trade: send `MassCancelByUser` to the master (all its resting orders leave the book) and publish the result — the [SVD_Pretrade] re-injects the innocent side's crossed quantity into the pipeline and blocks the at-fault account until a fresh margin update arrives for it (any fresh state clears the block and decides the admission on its own from then on) |
 | code 3 `OrderFullySettled` | the trade was already settled (double submission) | treat as settled: publish `Settled` — the idempotent path |
-| code 4 `OrderExpired` | the order's lifetime passed | send `CancelOrder` to the master, publish the result |
+| code 4 `OrderExpired` | the order's lifetime passed | send `CancelOrder` to the master (remove the expired order) and publish the result — the [SVD_Pretrade] re-injects the innocent side's crossed quantity into the pipeline |
 | code 5 / 6 `SymbolPaused` / `SettlementPaused` | the protocol is not accepting | transient: retry the batch with backoff; roll back on the deadline |
-| code 7 / 8 `InvalidPrice` / `InvalidQuantity` | the off-chain validation failed to catch a bad trade | send `CancelOrder` to the master for both orders, publish the result (a bug to alarm on) |
+| code 7 / 8 `InvalidPrice` / `InvalidQuantity` | the off-chain validation failed to catch a bad trade | send `CancelOrder` to the master for the at-fault order and publish the result — the [SVD_Pretrade] re-injects the innocent side's crossed quantity into the pipeline (a bug to alarm on) |
 | tx-level failure (RPC error, gas, nonce gap, reorg) | the transaction never settled | retry the submission with backoff and gas re-pricing; roll back on the deadline |
 | unclassifiable revert | unknown code or missing revert data | conservative: roll the batch back, publish `RolledBack` |
 
@@ -66,6 +70,18 @@ the failing trade index). To isolate one bad trade the [SVD_Settlement] **binary
 it resubmits the two halves, keeps splitting the failing half until the failing trade is singled
 out, then applies the per-code action to it and settles the rest. A batch that hits the deadline
 unresolved is rolled back as a whole.
+
+When the failing trade is singled out, the at-fault side's order leaves the book (the `CancelOrder`
+/ `MassCancelByUser` of the table above) and the **innocent side's crossed quantity goes back
+through the pre-trade pipeline**: the published result carries the failing trade and the at-fault
+side, the [SVD_Pretrade] re-injects the innocent counterparty's order with the failed cross's
+`traded_quantity` into its pipeline (the MPSC queue → the ingress SPSC queue → the
+[SVD_OMS_Master]), and the master merges the quantity into the resting order or re-inserts the order
+at the tail of its price level — the same merge semantics as a rollback restore, and the re-opened
+order replicates to the slave like any other execution. The re-injected order bypasses the margin
+gate — it restores an already-admitted state, not a new exposure — and its signature is re-verified
+on the way. The batch rollback stays on the reversal queue: there both sides are innocent and the
+whole batch is restored at once.
 
 ## The rollback — putting the failed trades back into the book
 
@@ -83,7 +99,9 @@ applied by the single owner of the book, in the same thread as the executions:
 /// and the ingress requests are applied by the single owner of the book.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum SettlementMsg {
-    /// Rolls one failed trade back: re-inserts `quantity` of the order into
+    /// Rolls one failed trade back (the batch rollback path — the per-trade
+    /// innocent-side restores go through the [SVD_Pretrade] pipeline
+    /// instead): re-inserts `quantity` of the order into
     /// the book (the failed cross). The [SVD_OMS_Master] merges the quantity
     /// into the resting order when `(user, nonce)` is still in the book
     /// (part of the order kept trading), and re-inserts the order at the
@@ -123,12 +141,32 @@ pub struct SettlementResult {
 pub enum SettlementOutcome {
     /// The batch settled on-chain.
     Settled,
-    /// The batch was reverted and the recovery action was applied (the
-    /// orders are removed from the book or the failure was idempotent).
-    Reverted { reason: SettlementFailure },
+    /// One failing trade was singled out of the batch: the at-fault side's
+    /// order is removed from the book and the innocent side's crossed
+    /// quantity is re-injected into the pre-trade pipeline by the
+    /// [SVD_Pretrade].
+    Reverted {
+        /// The index of the failing trade in `trades`.
+        failed_trade: usize,
+        /// Which side of the failing cross is at fault.
+        at_fault: FaultSide,
+        /// The decoded failure.
+        reason: SettlementFailure,
+    },
     /// The batch was rolled back: the trades' orders were re-inserted into
     /// the book by the reversal messages.
     RolledBack { reason: SettlementFailure },
+}
+
+/// Which side of a failing cross is at fault. The revert data of the
+/// protocol names the side (see doc/settlement-protocol.md); the settlement
+/// derives it for the off-chain failure reasons.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum FaultSide {
+    /// The taker's order caused the revert — the maker is innocent.
+    Taker,
+    /// The maker's order caused the revert — the taker is innocent.
+    Maker,
 }
 
 /// The failure a settlement outcome carries: the decoded `SettlementError`
@@ -177,23 +215,31 @@ removals above.
   replaced) and fee-bump replacement for a stuck transaction.
 - **The gas strategy** — config: max priority fee, the bump percentage per retry, the base fee
   tolerance; a retry re-estimates and re-prices within the caps.
-- **The RPC failover** — a pool of RPC endpoints; the submitter fails over on transport errors and
-  never submits the same transaction twice through two endpoints in parallel.
-- **The operator key** — the hot wallet of the [SVD_Settlement], loaded from a key file or an
-  external signer (HSM / KMS) behind the cryptography crate's signer traits; the key material
-  never travels the wire.
+- **The RPC node pool** — the submitter holds a pool of [Web3RPCNodes]: one primary and the
+  secondaries in the failover order (the same HA pattern as the [SVD_Sync]). A transport error or
+  a stalled node switches the submission to the next secondary; the monitoring of the pending
+  transactions continues on the new node — a transaction hash is node-agnostic — and the submitter
+  never submits the same transaction twice through two nodes in parallel. After a switch the
+  nonce manager re-synchronizes from the new node's view.
+- **The operator keystore** — the hot wallet private key of the [SVD_Settlement] is stored in an
+  encrypted keystore file on disk (the Web3 Secret Storage JSON format). The config carries only
+  the keystore path; the password is read from the system environment variable
+  `SVD_SETTLEMENT_KEYSTORE_PASSWORD` — never from the config, never in a log. The key is decrypted
+  at startup and kept in memory only, behind the cryptography crate's signer traits; the key
+  material never travels the wire.
 
 ## The dependency of svd-settlement crate
 - primitives: the `Trade` ingress of crates/primitives/src/message/hot_path.rs, and the new
-  `SettlementMsg` / `SettlementResult` of crates/primitives/src/message/settlement.rs. The book of
-  the primitives crate gains the execution paths for the reversal messages (the restore with the
-  merge semantics, the targeted cancel, the mass cancel), and the `CancelReason` taxonomy gains
-  `SettlementFailed`.
+  `SettlementMsg` / `SettlementResult` of crates/primitives/src/message/settlement.rs. The ingress
+  pipeline message of the hot path gains the `PipelineMsg` union (the user requests plus the
+  `RestoreOrder` of the innocent-side re-injection), the book of the primitives crate gains the
+  execution paths for the reversal messages and the pipeline restores (the merge semantics, the
+  targeted cancel, the mass cancel), and the `CancelReason` taxonomy gains `SettlementFailed`.
 - ipc: the share memory SPSC queues — the trade ingress from the [SVD_OMS_Master] and the reversal
   outgress back to it.
 - alloy: the ABI encoding of `settleBatch`, the revert data decoding of `SettlementError`, the
   transaction building, the signing, the receipts.
-- cryptography: the signer traits of crates/cryptography for the operator key.
+- cryptography: the signer traits of crates/cryptography for the operator keystore.
 - storage: the [Redis_Cluster] publication of the results and the [SQL_Cluster] writer of the
   trades / settlements tables.
 - journal: the same journal design as the [SVD_OMS_Slave] (to be extracted to a shared crate, see
@@ -206,7 +252,8 @@ removals above.
   drain runs in a pre-allocated batch buffer reused every iteration, the journal append is
   memory-mapped, and the hand-off uses pooled buffers (see the hot path discipline section).
 - **Submitter thread** (1, async tokio + alloy): the batch assembly, the submission, the
-  monitoring, the classification and the reversal decisions; it pushes the reversal messages into
+  monitoring, the classification and the reversal decisions — with the RPC node pool failover (the
+  primary first, then the secondaries); it pushes the reversal messages into
   the reversal SPSC queue and the results to the storage publisher.
 - **Storage publisher thread** (1): serializes the `SettlementResult` messages and publishes them
   to the [Redis_Cluster], with the at-least-once retry — the subscribers deduplicate by the batch
@@ -240,7 +287,10 @@ the SQL writer threads, never on the core thread.
 ## The features in svd-settlement crate
 - config: a TOML config loaded on start and reloadable via SIGHUP, holding the symbol, the core
   id, the trade SPSC queue (path, capacity, create), the reversal SPSC queue, the chain
-  connections (RPC pool, chain id, the settlement contract address), the operator key, the
+  connections (the RPC node pool — one primary and the secondaries in the failover order, each
+  with its endpoints — the connection and node stall timeouts, the chain id, the settlement
+  contract address), the operator keystore path (the password comes from the system environment,
+  never from the config), the
   batching (max trades, window) and the hand-off pool sizes, the retry policy (max retries,
   backoff, the rollback deadline), the confirmation depth, the gas strategy, the journal path, and
   the [Redis_Cluster] / [SQL_Cluster] connections.
@@ -248,8 +298,10 @@ the SQL writer threads, never on the core thread.
   above.
 - the batch builder: the aggregation of the trades into the `settleBatch` calls within the gas
   limits.
-- the submitter: the nonce manager, the gas strategy, the RPC failover, the confirmation watch and
-  the reorg re-submission.
+- the submitter: the nonce manager, the gas strategy, the RPC node pool failover (one primary and
+  the secondaries), the confirmation watch and the reorg re-submission.
+- the operator keystore: the encrypted keystore file with the password from the system environment
+  variable, unlocked at startup and held in memory only.
 - the classifier: the `SettlementError` decoding and the action table of the failure
   classification section, with the binary-split isolation of the failing trades.
 - the reversal engine: the `SettlementMsg` composition (one `RestoreOrder` per failed trade) and
