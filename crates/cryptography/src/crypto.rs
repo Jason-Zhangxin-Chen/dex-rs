@@ -1,5 +1,7 @@
 //! cryptography helpers for the workspace.
 
+use std::fmt;
+
 /// Errors from signing/verifying. Keep the cases distinct — a `bool` is a footgun.
 #[derive(Debug)]
 pub enum CryptoError {
@@ -8,6 +10,19 @@ pub enum CryptoError {
     MalformedPublicKey(String),
     SigningFailed,
 }
+
+impl fmt::Display for CryptoError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CryptoError::InvalidSignature => write!(f, "invalid signature"),
+            CryptoError::MalformedSignature(what) => write!(f, "malformed signature: {what}"),
+            CryptoError::MalformedPublicKey(what) => write!(f, "malformed public key: {what}"),
+            CryptoError::SigningFailed => write!(f, "signing failed"),
+        }
+    }
+}
+
+impl std::error::Error for CryptoError {}
 
 /// A signature value. Knows how to serialize, nothing else.
 pub trait Signature: Clone + Send + Sync + 'static {
