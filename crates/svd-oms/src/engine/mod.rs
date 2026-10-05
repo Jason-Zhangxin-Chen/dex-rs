@@ -15,11 +15,11 @@ pub mod slave;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 
+use crate::config::{Mode, OmsConfig};
 use async_nats::jetstream;
 use primitives::base::Symbol;
 use tracing::error;
-
-use crate::config::{Mode, OmsConfig};
+use util::pin;
 
 /// Value of the shared mode flag in master mode.
 pub const MODE_MASTER: u8 = 0;
@@ -134,24 +134,6 @@ pub(crate) async fn connect_jetstream(
     )))
 }
 
-/// Pins the current thread to the configured core.
-pub(crate) fn pin_current_thread(core_id: Option<usize>) {
-    let Some(core_id) = core_id else { return };
-    let Some(core_ids) = core_affinity::get_core_ids() else {
-        error!("no core ids available, the core thread stays unpinned");
-        return;
-    };
-    match core_ids.iter().find(|core| core.id == core_id) {
-        Some(core) => {
-            core_affinity::set_for_current(*core);
-        }
-        None => error!(
-            core_id = core_id,
-            "the configured core id is not available, the core thread stays unpinned"
-        ),
-    }
-}
-
 /// Shared state of the OMS engine. The signal handlers write into it, the
 /// core thread reads it.
 pub struct Runtime {
@@ -216,7 +198,7 @@ impl Runtime {
         let thread = std::thread::Builder::new()
             .name("oms-core".to_string())
             .spawn(move || {
-                pin_current_thread(core_id);
+                pin::pin_current_thread(core_id);
                 let result = match initial_mode {
                     Mode::Master => master::run(config, mode, shutdown),
                     Mode::Slave => slave::run(config, mode, shutdown, mode_rx),

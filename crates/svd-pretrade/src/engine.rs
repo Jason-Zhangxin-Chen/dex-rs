@@ -14,17 +14,18 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use crossbeam_queue::ArrayQueue;
-use ipc::mmap_spsc::SpscQueue;
-use primitives::message::hot_path::{CancelOrder, OrderMsg, PipelineMsg};
-use storage::RedisKeyStore;
-use tracing::{error, info};
-
 use crate::config::{ConfigError, PretradeConfig};
 use crate::feed;
 use crate::gateway::Gateway;
 use crate::margin::MarginCache;
 use crate::naming;
+use crossbeam_queue::ArrayQueue;
+use ipc::mmap_spsc::SpscQueue;
+use primitives::message::hot_path::{CancelOrder, OrderMsg, PipelineMsg};
+use storage::RedisKeyStore;
+use tracing::{error, info};
+use util::pin;
+use util::time::now_ms;
 
 /// Number of empty spins before the core thread yields the CPU.
 const SPINS_PER_YIELD: u32 = 4096;
@@ -158,7 +159,7 @@ impl Runtime {
         let thread = std::thread::Builder::new()
             .name("pretrade-core".to_string())
             .spawn(move || {
-                crate::engine::pin_current_thread(core_config.core_id);
+                pin::pin_current_thread(core_config.core_id);
                 spin(core_queue, &core_config.ingress, core_config.batch_size, core_shutdown);
             })
             .map_err(|err| EngineError::Runtime(format!("cannot spawn the core thread: {err}")))?;
@@ -193,24 +194,6 @@ impl Runtime {
         thread.join().map_err(|_| EngineError::Runtime("the core thread panicked".to_string()))?;
         info!("the pre-trade gateway stopped");
         Ok(())
-    }
-}
-
-/// Pins the current thread to the configured core.
-fn pin_current_thread(core_id: Option<usize>) {
-    let Some(core_id) = core_id else { return };
-    let Some(core_ids) = core_affinity::get_core_ids() else {
-        error!("no core ids available, the core thread stays unpinned");
-        return;
-    };
-    match core_ids.iter().find(|core| core.id == core_id) {
-        Some(core) => {
-            core_affinity::set_for_current(*core);
-        }
-        None => error!(
-            core_id = core_id,
-            "the configured core id is not available, the core thread stays unpinned"
-        ),
     }
 }
 
@@ -276,13 +259,6 @@ fn spin(
         }
     }
     info!("the forwarding core loop stopped");
-}
-
-/// The current wall clock in milliseconds.
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_millis() as u64)
 }
 
 #[cfg(test)]

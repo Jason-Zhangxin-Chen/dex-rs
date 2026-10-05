@@ -20,4 +20,5 @@ tracing-subscriber = { workspace = true }
 cache = { version = "0.1.0", path = "../cache" }
 primitives = { version = "0.1.0", path = "../primitives" }
 ipc = { version = "0.1.0", path = "../ipc" }
+util = { version = "0.1.0", path = "../util" }
 storage = { version = "0.1.0", path = "../storage" }

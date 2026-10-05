@@ -27,6 +27,7 @@ use tracing::{info, warn};
 use crate::config::PretradeConfig;
 use crate::margin::{MarginCache, MarginState, MarginView};
 use crate::naming;
+use util::time::now_ms;
 
 /// The reason strings of the rejects, stable for the user end.
 pub const REJECT_INVALID_SIGNATURE: &str = "InvalidSignature";
@@ -342,13 +343,6 @@ impl IntoResponse for Response {
         });
         (self.status, Json(json)).into_response()
     }
-}
-
-/// The current wall clock in milliseconds.
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_millis() as u64)
 }
 
 #[cfg(test)]
