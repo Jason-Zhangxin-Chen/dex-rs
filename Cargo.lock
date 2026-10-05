@@ -1554,6 +1554,7 @@ name = "svd-oms"
 version = "0.1.0"
 dependencies = [
  "async-nats",
+ "cache",
  "core_affinity",
  "crc32fast",
  "futures-util",

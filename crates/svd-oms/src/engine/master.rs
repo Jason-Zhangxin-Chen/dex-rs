@@ -14,12 +14,13 @@ use std::sync::{Arc, RwLock, mpsc};
 use std::time::Duration;
 
 use async_nats::jetstream;
+use cache::object_pool::Cache;
 use ipc::mmap_spsc::SpscQueue;
-use primitives::message::hot_path::{CancelOrder, OrderMsg, PipelineMsg, Trade};
+use primitives::message::hot_path::{OrderMsg, PipelineMsg, Trade};
 use primitives::orderbook::book::OrderBook;
 use primitives::orderbook::listener::{Listeners, PooledReplicationMsg, PooledTrades};
 use tracing::{error, info, warn};
-
+use primitives::order::Order;
 use super::{EngineError, connect_jetstream};
 use crate::config::OmsConfig;
 
@@ -71,24 +72,39 @@ pub fn run(
         oms.ingress.create,
     )?;
 
-    spin(book, ingress, oms.batch_size, shutdown);
+    // The batch buffer pool of the core loop: one pre-allocated buffer of
+    // `batch_size` slots, checked out for the lifetime of the loop.
+    let batch_pool = batch_buffer_pool(oms.batch_size);
+
+    spin(book, ingress, batch_pool, shutdown);
     Ok(())
 }
 
+/// Pre-allocates the pool of the ingress batch buffers: one buffer of
+/// `batch_size` default slots. The core loop checks its batch out of this
+/// pool instead of allocating one, and the buffer returns to the pool
+/// (cleared, capacity kept) when the loop stops.
+fn batch_buffer_pool(batch_size: usize) -> Cache<Vec<PipelineMsg>> {
+    Cache::new(1, move || {
+        let mut batch = Vec::with_capacity(batch_size);
+        batch.resize_with(batch_size, || {
+            PipelineMsg::User(OrderMsg::NewOrder(Order::default()))
+        });
+        batch
+    })
+}
+
 /// The core spin loop: pops a batch of requests and executes them. The
-/// batch buffer is pre-allocated once; the empty loop only spins, so the
-/// hot path performs no allocations and no blocking calls.
+/// batch buffer is checked out of the pre-allocated pool and returned to it
+/// when the loop stops; the empty loop only spins, so the hot path performs
+/// no allocations and no blocking calls.
 fn spin(
     mut book: OrderBook,
     mut ingress: SpscQueue<PipelineMsg>,
-    batch_size: usize,
+    batch_pool: Cache<Vec<PipelineMsg>>,
     shutdown: Arc<AtomicBool>,
 ) {
-    // todo: refine this heap allocation with memory pool.
-    let mut batch = Vec::with_capacity(batch_size);
-    batch.resize_with(batch_size, || {
-        PipelineMsg::User(OrderMsg::CancelOrder(CancelOrder::default()))
-    });
+    let mut batch = batch_pool.acquire();
     let mut empty_spins = 0u32;
     info!("the master core loop started");
     loop {
@@ -298,7 +314,7 @@ mod tests {
                     counter.fetch_add(msg.len(), Ordering::Relaxed);
                 })),
             );
-            spin(book, ingress, 16, spin_shutdown);
+            spin(book, ingress, batch_buffer_pool(16), spin_shutdown);
         });
         // Wait until both orders are processed, then stop.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);

@@ -17,6 +17,7 @@ memmap2 = { workspace = true }
 core_affinity = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+cache = { version = "0.1.0", path = "../cache" }
 primitives = { version = "0.1.0", path = "../primitives" }
 ipc = { version = "0.1.0", path = "../ipc" }
 storage = { version = "0.1.0", path = "../storage" }

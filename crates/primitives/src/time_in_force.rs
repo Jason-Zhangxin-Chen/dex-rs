@@ -4,9 +4,10 @@ use serde::{Deserialize, Serialize};
 
 /// Specifies how long an order remains active before it is executed or expires.
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum TimeInForce {
     /// Good till canceled.
+    #[default]
     Gtc,
     /// Immediate or canceled.
     Ioc,
