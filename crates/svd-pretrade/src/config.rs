@@ -152,6 +152,8 @@ mod address_serde {
     }
 }
 
+// todo: evaluate the below configurations, as they might be not necessary.
+
 /// The chain parameters of the settlement protocol: the EIP-712 domain the
 /// signatures are verified against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

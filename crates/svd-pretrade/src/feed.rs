@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
+use crate::margin::{MarginCache, MarginState};
 use crossbeam_queue::ArrayQueue;
 use futures_util::StreamExt;
 use primitives::address::Address;
@@ -23,8 +24,7 @@ use primitives::message::settlement::{
     FaultSide, SettlementFailure, SettlementOutcome, SettlementResult,
 };
 use tracing::{info, warn};
-
-use crate::margin::{MarginCache, MarginState};
+use util::time::now_ms;
 
 /// The backoff of a reconnect, in milliseconds.
 const RECONNECT_BACKOFF_MS: u64 = 100;
@@ -291,11 +291,4 @@ async fn connect_pubsub(urls: &[String]) -> Result<redis::aio::PubSub, String> {
         "cannot connect to any redis url {urls:?}: {}",
         last_error.unwrap_or_else(|| "no urls configured".to_string())
     ))
-}
-
-/// The current wall clock in milliseconds.
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_millis() as u64)
 }
