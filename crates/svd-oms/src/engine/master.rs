@@ -16,11 +16,11 @@ use std::time::Duration;
 use async_nats::jetstream;
 use cache::object_pool::Cache;
 use ipc::mmap_spsc::SpscQueue;
-use primitives::message::hot_path::{CancelOrder, OrderMsg, PipelineMsg, Trade};
+use primitives::message::hot_path::{OrderMsg, PipelineMsg, Trade};
 use primitives::orderbook::book::OrderBook;
 use primitives::orderbook::listener::{Listeners, PooledReplicationMsg, PooledTrades};
 use tracing::{error, info, warn};
-
+use primitives::order::Order;
 use super::{EngineError, connect_jetstream};
 use crate::config::OmsConfig;
 
@@ -88,7 +88,7 @@ fn batch_buffer_pool(batch_size: usize) -> Cache<Vec<PipelineMsg>> {
     Cache::new(1, move || {
         let mut batch = Vec::with_capacity(batch_size);
         batch.resize_with(batch_size, || {
-            PipelineMsg::User(OrderMsg::CancelOrder(CancelOrder::default()))
+            PipelineMsg::User(OrderMsg::NewOrder(Order::default()))
         });
         batch
     })

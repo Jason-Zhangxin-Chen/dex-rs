@@ -20,7 +20,7 @@ pub const NIL: OrderIdx = u32::MAX;
 pub const DEFAULT_RESERVE_REPLENISH_AMOUNT: u64 = 1;
 
 /// Order represents the trade intent of the user.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Order {
     /// Hot data for cache line friendly loading.
     pub hot: OrderHot,
@@ -129,7 +129,7 @@ impl From<Order> for OrderNode {
 /// OrderHot contains the core data for match engine, it is planed on purpose for cache line
 /// friendly loading, the tuple (Address, Nonce) is used to index an order in the book.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct OrderHot {
     /// (Address, Nonce) works as the key pointing to an order in the book.
     /// The user address.
@@ -152,7 +152,7 @@ pub struct OrderHot {
 
 /// OrderCold contains cold data of an order.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct OrderCold {
     /// Common cold data of an order.
     pub common: OrderColdCommon,
@@ -162,7 +162,7 @@ pub struct OrderCold {
 
 /// Common code data for order.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct OrderColdCommon {
     /// The hash of the order.
     id: Hash32,
@@ -209,9 +209,10 @@ impl OrderCold {
 /// OrderCold represents cold data of an order, it includes some common data and some type specific
 /// data fields.
 #[repr(C, u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum OrderKind {
     /// Standard limit order.
+    #[default]
     Standard,
 
     /// Iceberg order with hidden quantities.
