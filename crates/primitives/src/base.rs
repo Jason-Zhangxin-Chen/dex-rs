@@ -1,11 +1,24 @@
 //! Base order definitions.
 
+use std::fmt::Write;
+
 use serde::{Deserialize, Serialize};
 
 /// Symbol represents the symbol of a product.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Symbol(pub [u8; 32]);
+
+impl Symbol {
+    /// Formats the symbol as 64 lowercase hex characters.
+    pub fn hex(&self) -> String {
+        let mut out = String::with_capacity(64);
+        for byte in self.0 {
+            let _ = write!(out, "{byte:02x}");
+        }
+        out
+    }
+}
 
 /// Side represents the side of an order.
 #[repr(u8)]
@@ -93,6 +106,14 @@ mod tests {
         let restored: Symbol = from_slice(&bytes).unwrap();
         assert_eq!(symbol, restored);
         assert_eq!(restored.0, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_symbol_hex() {
+        assert_eq!(Symbol([0u8; 32]).hex(), "0".repeat(64));
+        let mut bytes = [0u8; 32];
+        bytes[31] = 0xab;
+        assert_eq!(Symbol(bytes).hex(), format!("{}ab", "0".repeat(62)));
     }
 
     #[test]

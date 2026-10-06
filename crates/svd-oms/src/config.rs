@@ -249,7 +249,7 @@ mod symbol_serde {
     use super::*;
 
     pub fn serialize<S: Serializer>(symbol: &Symbol, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&format!("0x{}", naming::symbol_hex(*symbol)))
+        serializer.serialize_str(&format!("0x{}", symbol.hex()))
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Symbol, D::Error> {

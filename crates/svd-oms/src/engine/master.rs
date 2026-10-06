@@ -35,7 +35,7 @@ pub fn run(
     shutdown: Arc<AtomicBool>,
 ) -> Result<(), EngineError> {
     let oms = config.read().expect("config lock").clone();
-    info!(symbol = %crate::naming::symbol_hex(oms.symbol), "starting the OMS master");
+    info!(symbol = %oms.symbol.hex(), "starting the OMS master");
 
     // NATS: connect and ensure the stream (blocking on startup is fine).
     let jetstream = tokio::runtime::Builder::new_current_thread()

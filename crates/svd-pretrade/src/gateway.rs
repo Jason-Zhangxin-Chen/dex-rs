@@ -222,18 +222,18 @@ impl Gateway {
         let fetched = match fetched {
             Ok(Ok(fetched)) => fetched,
             Ok(Err(err)) => {
-                warn!(error = %err, account = %naming::address_hex(account), "the margin pull panicked");
+                warn!(error = %err, account = %account.hex(), "the margin pull panicked");
                 return None;
             }
             Err(_) => {
-                warn!(account = %naming::address_hex(account), "the margin pull timed out");
+                warn!(account = %account.hex(), "the margin pull timed out");
                 return None;
             }
         };
         let fetched = match fetched {
             Ok(fetched) => fetched,
             Err(err) => {
-                warn!(error = %err, account = %naming::address_hex(account), "the margin pull failed");
+                warn!(error = %err, account = %account.hex(), "the margin pull failed");
                 return None;
             }
         };
@@ -246,14 +246,14 @@ impl Gateway {
                     block: change.block,
                 },
                 Err(err) => {
-                    warn!(error = %err, account = %naming::address_hex(account), "cannot decode the pulled margin state");
+                    warn!(error = %err, account = %account.hex(), "cannot decode the pulled margin state");
                     return None;
                 }
             },
             None => MarginState::ZERO,
         };
         info!(
-            account = %naming::address_hex(account),
+            account = %account.hex(),
             available = state.available,
             "the margin pull attached the account"
         );

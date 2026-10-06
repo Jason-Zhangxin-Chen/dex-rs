@@ -52,7 +52,7 @@ pub enum SettlementMsg {
 }
 
 /// The result of one settlement batch, published by [SVD_Settlement] to the
-/// storage channel `svd:stl:{symbol_hex}:settlements`. The [SVD_Pretrade]
+/// storage channel `svd:stl:{symbol.hex()}:settlements`. The [SVD_Pretrade]
 /// consumes the outcome twice: it re-injects the innocent side's crossed
 /// quantity of a reverted trade into the pre-trade pipeline, and it blocks
 /// the at-fault account when the failure is an insufficient margin.
