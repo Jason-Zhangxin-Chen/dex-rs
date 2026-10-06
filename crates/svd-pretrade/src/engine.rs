@@ -123,7 +123,7 @@ impl Runtime {
     /// thread, then serves the HTTP gateway until the shutdown.
     pub fn launch(&self) -> Result<(), EngineError> {
         let config = self.config.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
-        info!(symbol = %naming::symbol_hex(config.symbol), "starting the pre-trade gateway");
+        info!(symbol = %config.symbol.hex(), "starting the pre-trade gateway");
 
         // The shared structures: the pipeline queue, the margin cache, the
         // feed liveness and the keyed store of the pulls.

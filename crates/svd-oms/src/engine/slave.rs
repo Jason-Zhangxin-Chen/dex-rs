@@ -48,7 +48,7 @@ pub fn run(
     mode_rx: tokio::sync::watch::Receiver<u8>,
 ) -> Result<(), EngineError> {
     let oms = config.read().expect("config lock").clone();
-    info!(symbol = %naming::symbol_hex(oms.symbol), "starting the OMS slave");
+    info!(symbol = %oms.symbol.hex(), "starting the OMS slave");
 
     // Recovery: the book rebuilt from the journal / Redis snapshot, and the
     // stream sequence to resume from.

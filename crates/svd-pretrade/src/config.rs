@@ -12,8 +12,6 @@ use primitives::base::Symbol;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use storage::RedisConfig;
 
-use crate::naming;
-
 /// Default batch size of the forwarding loop.
 const DEFAULT_BATCH_SIZE: usize = 1024;
 /// Default capacity of the shared MPSC queue.
@@ -129,7 +127,7 @@ mod symbol_serde {
     use super::*;
 
     pub fn serialize<S: Serializer>(symbol: &Symbol, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&format!("0x{}", naming::symbol_hex(*symbol)))
+        serializer.serialize_str(&format!("0x{}", symbol.hex()))
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Symbol, D::Error> {
@@ -143,7 +141,7 @@ mod address_serde {
     use super::*;
 
     pub fn serialize<S: Serializer>(address: &Address, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&format!("0x{}", naming::address_hex(*address)))
+        serializer.serialize_str(&format!("0x{}", address.hex()))
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Address, D::Error> {

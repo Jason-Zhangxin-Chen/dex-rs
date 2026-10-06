@@ -247,7 +247,7 @@ async fn consume_settlement(
                 FaultSide::Maker => trade.maker.hot.user,
             };
             cache.set_blocked(account);
-            info!(account = %crate::naming::address_hex(account), "blocked on an insufficient margin");
+            info!(account = %account.hex(), "blocked on an insufficient margin");
         }
         // The innocent side's crossed quantity re-enters the pipeline. The
         // restore bypasses the margin gate — it re-enters an already-admitted
@@ -259,7 +259,7 @@ async fn consume_settlement(
         if let Err(err) = cryptography::evm::verify_order(&innocent, chain_id, verifying_contract) {
             warn!(
                 error = %err,
-                account = %crate::naming::address_hex(innocent.hot.user),
+                account = %innocent.hot.user.hex(),
                 "the innocent order signature does not verify, dropping the restore"
             );
             continue;
