@@ -240,7 +240,7 @@ fn default_shards() -> usize {
     DEFAULT_SHARDS
 }
 
-/// A share-memory SPSC queue wired to the [SVD_OMS_Master] ingress.
+/// A share-memory SPSC queue wired to the [SVD_OMS_Master].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpScConfig {
@@ -327,7 +327,7 @@ batch_size = 256
 listen_addr = "0.0.0.0:8080"
 mpsc_capacity = 65536
 
-[ingress]
+[egress]
 path = "/dev/shm/svd_oms.ingress"
 capacity = 65536
 create = true
@@ -377,7 +377,7 @@ pool_size = 4
         let config = PretradeConfig::from_toml(
             r#"
 symbol = "X"
-[ingress]
+[egress]
 path = "/tmp/q"
 capacity = 1024
 [chain]

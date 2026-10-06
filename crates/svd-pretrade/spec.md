@@ -128,7 +128,7 @@ pub enum PipelineMsg {
 
 In between the handlers and the core thread the accepted `PipelineMsg`s travel through the shared
 pre-allocated lock-free MPSC queue (the crossbeam `ArrayQueue`), and the core thread moves them
-into the ingress SPSC queue wired to the [SVD_OMS_Master]. The queue carries fixed-size `Copy`
+into the egress SPSC queue wired to the [SVD_OMS_Master]. The queue carries fixed-size `Copy`
 values — the pushes are plain memory copies into the pre-allocated slots — and the
 [SVD_OMS_Master] drains the same `PipelineMsg` from its ingress queue: a `User` message executes as
 the current `OrderMsg`, a `RestoreOrder` merges the quantity into the resting order or re-inserts
@@ -249,7 +249,7 @@ lives on the handler threads and the feed threads, never on the core thread.
 
 ## The features in svd-pretrade crate
 - config: a TOML config loaded on start and reloaded at runtime via SIGHUP, holding the symbol, the
-  core id, the HTTP listen address, the MPSC queue capacity, the ingress SPSC queue (path,
+  core id, the HTTP listen address, the MPSC queue capacity, the egress SPSC queue (path,
   capacity, create), the margin parameters (margin ratio bps, fee bps, quotePerTickLot,
   allow_unknown_accounts, the pull timeout, the stale feed timeout, the cache bounds and the
   eviction), and the [Redis_Cluster] connections of the feeds.

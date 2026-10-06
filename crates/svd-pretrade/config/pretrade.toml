@@ -17,8 +17,8 @@ listen_addr = "127.0.0.1:8080"
 # forwarding thread.
 mpsc_capacity = 65536
 
-# The ingress SPSC queue wired to the SVD_OMS_Master.
-[ingress]
+# The egress SPSC queue wired to the SVD_OMS_Master.
+[egress]
 path = "/dev/shm/svd_oms.ingress"
 capacity = 65536
 create = false
