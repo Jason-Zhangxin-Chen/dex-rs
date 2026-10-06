@@ -160,7 +160,7 @@ impl Runtime {
             .name("pretrade-core".to_string())
             .spawn(move || {
                 pin::pin_current_thread(core_config.core_id);
-                spin(core_queue, &core_config.ingress, core_config.batch_size, core_shutdown);
+                spin(core_queue, &core_config.egress, core_config.batch_size, core_shutdown);
             })
             .map_err(|err| EngineError::Runtime(format!("cannot spawn the core thread: {err}")))?;
 
@@ -204,18 +204,18 @@ impl Runtime {
 /// queue slots — no checks, no locks, no blocking, no allocation.
 fn spin(
     queue: Arc<ArrayQueue<PipelineMsg>>,
-    ingress_config: &crate::config::SpScConfig,
+    egress_config: &crate::config::SpScConfig,
     batch_size: usize,
     shutdown: Arc<AtomicBool>,
 ) {
-    let mut ingress = match SpscQueue::<PipelineMsg>::open(
-        &ingress_config.path,
-        ingress_config.capacity,
-        ingress_config.create,
+    let mut egress = match SpscQueue::<PipelineMsg>::open(
+        &egress_config.path,
+        egress_config.capacity,
+        egress_config.create,
     ) {
         Ok(queue) => queue,
         Err(err) => {
-            error!(error = %err, "cannot open the ingress queue");
+            error!(error = %err, "cannot open the egress queue");
             return;
         }
     };
@@ -242,7 +242,7 @@ fn spin(
         if n > 0 {
             let mut pushed = 0usize;
             while pushed < n {
-                pushed += ingress.push_batch(&batch[pushed..n]);
+                pushed += egress.push_batch(&batch[pushed..n]);
                 if pushed < n {
                     if shutdown.load(Ordering::Relaxed) {
                         return;
