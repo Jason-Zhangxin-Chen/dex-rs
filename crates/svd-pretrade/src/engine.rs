@@ -314,7 +314,7 @@ mod tests {
             .push(PipelineMsg::RestoreOrder { order: order(2, 2), quantity: Quantity(3) })
             .expect("the queue has capacity");
 
-        // The core thread forwards both messages into the ingress queue.
+        // The core thread forwards both messages into the egress queue.
         let forwarded = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&forwarded);
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -327,15 +327,15 @@ mod tests {
                 capacity: 64,
                 create: true,
             };
-            // Drain the ingress after the spin processes the batch: a second
+            // Drain the egress after the spin processes the batch: a second
             // consumer thread reads what the spin pushed.
             let spin_queue = spin_queue;
             spin(spin_queue, &config, 16, spin_shutdown);
             // Signal completion by draining through this thread instead.
-            let mut ingress = SpscQueue::<PipelineMsg>::open(&spin_path, 64, false).unwrap();
+            let mut egress = SpscQueue::<PipelineMsg>::open(&spin_path, 64, false).unwrap();
             let mut batch =
                 vec![PipelineMsg::User(OrderMsg::CancelOrder(CancelOrder::default())); 16];
-            let n = ingress.pop_batch(&mut batch);
+            let n = egress.pop_batch(&mut batch);
             counter.fetch_add(n, Ordering::Relaxed);
         });
 

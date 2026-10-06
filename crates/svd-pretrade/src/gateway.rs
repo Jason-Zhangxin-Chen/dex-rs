@@ -456,7 +456,7 @@ mod tests {
         let config = PretradeConfig::from_toml(
             r#"
 symbol = "X"
-[ingress]
+[egress]
 path = "/tmp/q"
 capacity = 1024
 [chain]
