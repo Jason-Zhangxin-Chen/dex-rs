@@ -292,8 +292,8 @@ pub struct PretradeConfig {
     /// forwarding thread.
     #[serde(default = "default_mpsc_capacity")]
     pub mpsc_capacity: usize,
-    /// The ingress SPSC queue wired to the [SVD_OMS_Master].
-    pub ingress: SpScConfig,
+    /// The egress SPSC queue wired to the [SVD_OMS_Master].
+    pub egress: SpScConfig,
     /// The chain parameters of the settlement protocol.
     pub chain: ChainConfig,
     /// The margin gate parameters.
@@ -362,8 +362,8 @@ pool_size = 4
         assert_eq!(config.batch_size, 256);
         assert_eq!(config.listen_addr, "0.0.0.0:8080");
         assert_eq!(config.mpsc_capacity, 65_536);
-        assert_eq!(config.ingress.capacity, 65_536);
-        assert!(config.ingress.create);
+        assert_eq!(config.egress.capacity, 65_536);
+        assert!(config.egress.create);
         assert_eq!(config.chain.chain_id, 31_337);
         assert_eq!(config.chain.verifying_contract, Address([0xabu8; 20]));
         assert_eq!(config.margin.margin_ratio_bps, 10_000);
@@ -391,7 +391,7 @@ verifying_contract = "0x0000000000000000000000000000000000000001"
         assert_eq!(config.batch_size, DEFAULT_BATCH_SIZE);
         assert_eq!(config.mpsc_capacity, DEFAULT_MPSC_CAPACITY);
         assert_eq!(config.listen_addr, DEFAULT_LISTEN_ADDR);
-        assert!(config.ingress.create);
+        assert!(config.egress.create);
         assert_eq!(config.margin, MarginConfig::default());
         assert_eq!(config.margin.margin_ratio_bps, 10_000);
         assert_eq!(config.margin.stale_feed_ms, DEFAULT_STALE_FEED_MS);
