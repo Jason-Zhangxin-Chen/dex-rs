@@ -1,8 +1,9 @@
 //! The feed threads of the gateway: the margin feed applies the [SVD_Sync]
 //! margin states to the shared cache and sweeps it; the settlement feed
 //! reacts to the [SVD_Settlement] results — it re-injects the innocent
-//! side's crossed quantity of a failed trade into the pipeline queue and
-//! blocks the at-fault account on an insufficient margin.
+//! side's crossed quantity of a failed trade into the pipeline queue,
+//! removes the at-fault side's orders through the same queue and blocks
+//! the at-fault account on an insufficient margin.
 //!
 //! Each feed owns its thread with a dedicated current-thread tokio runtime
 //! and a dedicated Redis pub/sub connection (a single node of the cluster —
@@ -18,11 +19,12 @@ use crate::margin::{MarginCache, MarginState};
 use crossbeam_queue::ArrayQueue;
 use futures_util::StreamExt;
 use primitives::address::Address;
-use primitives::message::hot_path::PipelineMsg;
+use primitives::message::hot_path::{OrderMsg, PipelineMsg};
 use primitives::message::margin::MarginMsg;
 use primitives::message::settlement::{
     FaultSide, SettlementFailure, SettlementOutcome, SettlementResult,
 };
+use primitives::message::side_path::CancelReason;
 use tracing::{info, warn};
 use util::time::now_ms;
 
@@ -145,8 +147,8 @@ async fn consume_margin(
 
 /// Spawns the settlement feed thread: subscribes to the settlement result
 /// channel, re-injects the innocent side's crossed quantity into the
-/// pipeline queue and blocks the at-fault account on an insufficient
-/// margin.
+/// pipeline queue, removes the at-fault side's orders through the same
+/// queue and blocks the at-fault account on an insufficient margin.
 pub fn spawn_settlement_feed(
     urls: Vec<String>,
     channel: String,
@@ -233,29 +235,63 @@ async fn consume_settlement(
                 continue;
             }
         };
-        let SettlementOutcome::Reverted { failed_trade, at_fault, reason } = result.outcome else {
+        // Only the reverted outcome is consumed here: a settled batch needs
+        // no action, and the [SVD_Settlement] retries a transient failure (a
+        // paused protocol, a down chain) until it resolves — no other
+        // outcome is ever published.
+        let SettlementOutcome::Reverted { failed_trade, at_fault: at_fault_side, reason } =
+            result.outcome
+        else {
             continue;
         };
         let Some(trade) = result.trades.get(failed_trade) else {
             warn!(failed_trade, batch_seq = result.batch_seq, "the failing trade is out of range");
             continue;
         };
-        // The insufficient margin blocks the at-fault account only.
-        if reason == SettlementFailure::Protocol(2) {
-            let account = match at_fault {
-                FaultSide::Taker => trade.taker.hot.user,
-                FaultSide::Maker => trade.maker.hot.user,
-            };
-            cache.set_blocked(account);
-            info!(account = %account.hex(), "blocked on an insufficient margin");
+        // The failed cross by fault side: the at-fault side leaves the book,
+        // the innocent side's crossed quantity re-enters it.
+        let (at_fault, innocent, quantity) = match at_fault_side {
+            FaultSide::Taker => (trade.taker, trade.maker, trade.traded_quantity),
+            FaultSide::Maker => (trade.maker, trade.taker, trade.traded_quantity),
+        };
+        // The removal of the at-fault side, per the failure taxonomy of
+        // doc/settlement-protocol.md: an exhausted margin blocks the account
+        // and removes every resting order of it, a deterministic failure of
+        // one order (forged signature, expired, bad price) removes just that
+        // order, and an unclassifiable failure removes nothing.
+        match reason {
+            SettlementFailure::Protocol(2) => {
+                cache.set_blocked(at_fault.hot.user);
+                info!(account = %at_fault.hot.user.hex(), "blocked on an insufficient margin");
+                let removal = PipelineMsg::User(OrderMsg::MassCancelByUser {
+                    user: at_fault.hot.user,
+                    reason: CancelReason::SettlementFailed,
+                });
+                if !push_pipeline(queue, removal, shutdown) {
+                    return Ok(());
+                }
+            }
+            SettlementFailure::Protocol(1 | 4 | 7 | 8) => {
+                let removal = PipelineMsg::User(OrderMsg::CancelBySettlement {
+                    user: at_fault.hot.user,
+                    nonce: at_fault.hot.nonce,
+                    reason: CancelReason::SettlementFailed,
+                });
+                if !push_pipeline(queue, removal, shutdown) {
+                    return Ok(());
+                }
+            }
+            _ => {
+                warn!(
+                    ?reason,
+                    account = %at_fault.hot.user.hex(),
+                    "an unclassifiable settlement failure, restoring the innocent side only"
+                );
+            }
         }
         // The innocent side's crossed quantity re-enters the pipeline. The
         // restore bypasses the margin gate — it re-enters an already-admitted
         // state — and its signature is re-verified before the re-injection.
-        let (innocent, quantity) = match at_fault {
-            FaultSide::Taker => (trade.maker, trade.traded_quantity),
-            FaultSide::Maker => (trade.taker, trade.traded_quantity),
-        };
         if let Err(err) = cryptography::evm::verify_order(&innocent, chain_id, verifying_contract) {
             warn!(
                 error = %err,
@@ -264,15 +300,24 @@ async fn consume_settlement(
             );
             continue;
         }
-        let restore = PipelineMsg::RestoreOrder { order: innocent, quantity };
-        while queue.push(restore).is_err() {
-            if shutdown.load(Ordering::Relaxed) {
-                return Ok(());
-            }
-            std::thread::yield_now();
+        if !push_pipeline(queue, PipelineMsg::RestoreOrder { order: innocent, quantity }, shutdown)
+        {
+            return Ok(());
         }
     }
     Ok(())
+}
+
+/// Pushes a message into the pipeline queue, spinning until it lands or the
+/// shutdown is requested. Returns whether the message landed.
+fn push_pipeline(queue: &ArrayQueue<PipelineMsg>, msg: PipelineMsg, shutdown: &AtomicBool) -> bool {
+    while queue.push(msg).is_err() {
+        if shutdown.load(Ordering::Relaxed) {
+            return false;
+        }
+        std::thread::yield_now();
+    }
+    true
 }
 
 /// Connects a pub/sub client to the first reachable node URL.

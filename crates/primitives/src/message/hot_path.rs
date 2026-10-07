@@ -3,20 +3,41 @@
 //!
 use crate::address::Address;
 use crate::base::{Hash32, Nonce, Symbol};
+use crate::message::side_path::CancelReason;
 use crate::order::Order;
 use crate::signature::Signature;
 use crate::value::{Price, Quantity, TimestampMs};
 use serde::{Deserialize, Serialize};
 
-/// Messages sent from user end. It is forwarded to [`SVD_OMS_Master`] from ['SVD_Pretrade']for
-/// processing via share memory SPSC queue. The messages are fixed sized for preallocation
-/// in share memory.
+/// Messages the ['SVD_Pretrade'] forwards to the [`SVD_OMS_Master`] via the
+/// share memory SPSC queue: the validated user requests and the
+/// settlement-driven removals. The messages are fixed sized for
+/// preallocation in share memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrderMsg {
     /// New Order.
     NewOrder(Order),
     /// Cancel Order.
     CancelOrder(CancelOrder),
+    /// Removes one order of the book: a deterministic settlement failure of
+    /// that order (forged signature, expired, bad price). Pushed by the
+    /// settlement feed of the ['SVD_Pretrade'], not a user request.
+    CancelBySettlement {
+        /// The user of the order.
+        user: Address,
+        /// The nonce of the order.
+        nonce: Nonce,
+        /// Why the order is removed.
+        reason: CancelReason,
+    },
+    /// Removes every resting order of an account: the account's margin is
+    /// exhausted on-chain and it must stop trading.
+    MassCancelByUser {
+        /// The account to remove.
+        user: Address,
+        /// Why the account's orders are removed.
+        reason: CancelReason,
+    },
 }
 
 /// CancelOrder defines the data required for cancelling an order.
@@ -182,8 +203,10 @@ pub enum PipelineMsg {
     User(OrderMsg),
     /// Re-injects the crossed quantity of an innocent side: the trade failed
     /// to settle because of the other side, so this order's consumed
-    /// quantity re-enters the book. The [`SVD_OMS_Master`] applies the same
-    /// merge semantics as a rollback restore.
+    /// quantity re-enters the book. The [`SVD_OMS_Master`] merges the
+    /// quantity into the resting order when `(user, nonce)` is still in the
+    /// book, and re-inserts the order at the tail of its price level when it
+    /// is gone.
     RestoreOrder {
         /// The order of the innocent side, as it was in the failed trade.
         order: Order,
@@ -245,5 +268,23 @@ mod pipeline_tests {
             to_vec(&PipelineMsg::RestoreOrder { order: order(1, 1), quantity: Quantity(7) })
                 .unwrap();
         assert_ne!(user, restore);
+    }
+
+    #[test]
+    fn test_pipeline_msg_settlement_removals_roundtrip() {
+        let cancel = PipelineMsg::User(OrderMsg::CancelBySettlement {
+            user: Address([1; 20]),
+            nonce: Nonce(3),
+            reason: CancelReason::SettlementFailed,
+        });
+        let bytes = to_vec(&cancel).unwrap();
+        assert_eq!(cancel, from_slice(&bytes).unwrap());
+
+        let mass = PipelineMsg::User(OrderMsg::MassCancelByUser {
+            user: Address([2; 20]),
+            reason: CancelReason::SettlementFailed,
+        });
+        let bytes = to_vec(&mass).unwrap();
+        assert_eq!(mass, from_slice(&bytes).unwrap());
     }
 }
