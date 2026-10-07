@@ -128,8 +128,9 @@ fn verify_signature(
 }
 
 /// The on-chain tag of a time in force: the tag in the low byte, the GTD
-/// lifetime (hours) in the next byte.
-fn time_in_force_tag(time_in_force: TimeInForce) -> u128 {
+/// lifetime (hours) in the next byte. Public: the settlement ABI encoder
+/// reuses it so the calldata layout matches the signed EIP-712 digest.
+pub fn time_in_force_tag(time_in_force: TimeInForce) -> u128 {
     match time_in_force {
         TimeInForce::Gtc => 0,
         TimeInForce::Ioc => 1,
