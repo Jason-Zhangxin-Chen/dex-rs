@@ -35,7 +35,8 @@ create = true
 [settlement]
 path = "/dev/shm/svd_oms_ethusdc.settlement"
 capacity = 65536
-create = true
+# The settlement service owns the queue file: it creates it, the OMS attaches.
+create = false
 
 # The order book configs.
 [book]
