@@ -3,7 +3,9 @@ resolver = "2"
 members = ["crates/cache", "crates/ipc", "crates/cryptography", "crates/primitives", "crates/storage", "crates/svd-oms", "crates/svd-pretrade", "crates/svd-settlement", "crates/svd-sync", "crates/util", "crates/svd-query", "crates/svd-pubsub"]
 
 [workspace.dependencies]
-alloy = "2.5.0"
+# The members pick the alloy feature set explicitly (see
+# svd-settlement/Cargo.toml).
+alloy = { version = "2.5.0", default-features = false }
 serde = "1.0.229"
 rmp-serde = "1.3.1"
 slab = "0.4.12"
