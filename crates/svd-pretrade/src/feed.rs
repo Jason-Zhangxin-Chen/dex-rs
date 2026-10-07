@@ -309,15 +309,15 @@ async fn consume_settlement(
 }
 
 /// Pushes a message into the pipeline queue, spinning until it lands or the
-/// shutdown is requested. Returns whether the message landed.
+/// shutdown is requested. Returns whether the message landed. The shutdown
+/// check runs before the first push attempt, so a producer stops as soon as
+/// it observes the flag and the core loop's shutdown drain sees no new
+/// messages.
 fn push_pipeline(queue: &ArrayQueue<PipelineMsg>, msg: PipelineMsg, shutdown: &AtomicBool) -> bool {
-    while queue.push(msg).is_err() {
-        if shutdown.load(Ordering::Relaxed) {
-            return false;
-        }
+    while !shutdown.load(Ordering::Relaxed) && queue.push(msg).is_err() {
         std::thread::yield_now();
     }
-    true
+    !shutdown.load(Ordering::Relaxed)
 }
 
 /// Connects a pub/sub client to the first reachable node URL.
