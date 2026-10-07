@@ -47,7 +47,10 @@ struct Order {
     uint64 quantity;     // visible quantity, lot units
     uint64 totalQuantity;// visible + hidden (iceberg / reserve), lot units
     uint8 side;          // 0 = buy, 1 = sell
-    uint8 timeInForce;   // the same tags as the off-chain TimeInForce
+    uint64 timeInForce;  // packed tag: low byte = the off-chain TimeInForce tag
+                         // (0 gtc, 1 ioc, 2 fok, 3 gtd, 4 day), the next byte =
+                         // the GTD lifetime in hours — the EIP-712 hash layout
+                         // (see the order hash section), NOT a plain uint8
     uint64 timestampMs;  // creation time
 }
 ```
