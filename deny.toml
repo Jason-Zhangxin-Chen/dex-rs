@@ -22,6 +22,11 @@ allow = [
     "Zlib",
     "OpenSSL",
     "MPL-2.0",
+    # The rustls root store (webpki-root-certs): a permissive data
+    # license, the standard companion of the rustls TLS stack that the
+    # alloy transport uses (mirrors the async-nats `ring` choice of
+    # avoiding the aws-lc build).
+    "CDLA-Permissive-2.0",
 ]
 
 exceptions = [
@@ -81,4 +86,11 @@ db-path = "~/.cargo/advisory-db"
 unmaintained = "workspace"
 unsound = "all"
 yanked = "deny"
-ignore = []
+ignore = [
+    # The Marvin Attack timing side-channel in the RustCrypto `rsa` crate.
+    # No fixed release exists upstream; sqlx-mysql uses `rsa` only for the
+    # MySQL caching_sha2_password auth handshake, never for the operator
+    # key material (that path is k256-only). Revisit when RustCrypto ships
+    # a fix or sqlx drops the dependency.
+    "RUSTSEC-2023-0071",
+]

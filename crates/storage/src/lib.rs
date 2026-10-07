@@ -5,6 +5,7 @@
 //! implementation ([`RedisStore`]) is wired to the Redis cluster; the SQL
 //! cluster plugs in here once its schema is defined.
 
+pub mod journal;
 pub mod redis_store;
 
 pub use redis_store::{RedisConfig, RedisKeyStore, RedisStore};
