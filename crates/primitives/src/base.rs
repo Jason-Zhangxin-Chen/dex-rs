@@ -37,6 +37,17 @@ pub enum Side {
 #[serde(transparent)]
 pub struct Hash32(pub [u8; 32]);
 
+impl Hash32 {
+    /// Formats the hash as 64 lowercase hex characters.
+    pub fn hex(&self) -> String {
+        let mut out = String::with_capacity(64);
+        for byte in self.0 {
+            let _ = write!(out, "{byte:02x}");
+        }
+        out
+    }
+}
+
 /// Nonce represents a sequence number of user's order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(transparent)]
