@@ -138,6 +138,20 @@ impl OrderBook {
                 self.listeners.fanout_replication_msg(PooledReplicationMsg::new(changes, None));
                 Ok(())
             }
+            OrderMsg::CancelBySettlement { user, nonce, reason } => {
+                let mut changes = self.memory_pools.changes_pool.acquire();
+                self.cancel_resting_order(*user, *nonce, *reason, &mut changes);
+                // A cancellation never trades.
+                self.listeners.fanout_replication_msg(PooledReplicationMsg::new(changes, None));
+                Ok(())
+            }
+            OrderMsg::MassCancelByUser { user, reason } => {
+                let mut changes = self.memory_pools.changes_pool.acquire();
+                self.cancel_orders_by_user(*user, *reason, &mut changes);
+                // A cancellation never trades.
+                self.listeners.fanout_replication_msg(PooledReplicationMsg::new(changes, None));
+                Ok(())
+            }
         }
     }
 
@@ -415,21 +429,59 @@ impl OrderBook {
         input: &CancelOrder,
         changes: &mut Vec<OrderChange>,
     ) -> Result<(), OrderBookErr> {
-        // The index key is the (address, nonce) tuple; a cancellation of an
-        // unknown order is a silent no-op. The order_id of the request is not
-        // verified against the resting order for now.
-        if let Some(order) = self.remove_resting_order(input.user(), input.nonce()) {
+        // The order_id of the request is not verified against the resting
+        // order for now.
+        self.cancel_resting_order(
+            input.user(),
+            input.nonce(),
+            CancelReason::UserRequested,
+            changes,
+        );
+        Ok(())
+    }
+
+    /// Cancels a resting order by its `(user, nonce)` key with the given
+    /// reason: the shared body of the user cancel and the settlement-driven
+    /// cancel. A cancellation of an unknown order is a silent no-op.
+    fn cancel_resting_order(
+        &mut self,
+        user: Address,
+        nonce: Nonce,
+        reason: CancelReason,
+        changes: &mut Vec<OrderChange>,
+    ) {
+        if let Some(order) = self.remove_resting_order(user, nonce) {
             // The engine does not track the cumulative filled quantity of a
             // resting order, so zero is reported here.
             changes.push(OrderChange::new(
                 order,
-                OrderStatus::Canceled {
-                    filled_quantity: Quantity::ZERO,
-                    reason: CancelReason::UserRequested,
-                },
+                OrderStatus::Canceled { filled_quantity: Quantity::ZERO, reason },
             ));
         }
-        Ok(())
+    }
+
+    /// Cancels every resting order of an account with the given reason: the
+    /// account must stop trading (its margin is exhausted on-chain). The
+    /// user's index list is drained by its head so the removal performs no
+    /// allocation on the core loop.
+    fn cancel_orders_by_user(
+        &mut self,
+        user: Address,
+        reason: CancelReason,
+        changes: &mut Vec<OrderChange>,
+    ) {
+        while let Some(idx) =
+            self.state.user_orders.get(&user).and_then(|orders| orders.first()).copied()
+        {
+            let nonce = self
+                .state
+                .arena
+                .get(idx as usize)
+                .expect("an indexed order exists in the arena")
+                .hot
+                .nonce;
+            self.cancel_resting_order(user, nonce, reason, changes);
+        }
     }
 
     /// Runs the admission checks and the matching sweep of a new order, then
@@ -1195,6 +1247,29 @@ impl OrderBook {
         let mut changes = self.memory_pools.changes_pool.acquire();
         self.process_cancel_order(input, &mut changes)?;
         Ok(changes.take())
+    }
+
+    /// Test helper mirroring the pooled settlement-cancel path of
+    /// [`OrderBook::execute`].
+    #[cfg(test)]
+    fn execute_settlement_cancel(
+        &mut self,
+        user: Address,
+        nonce: Nonce,
+        reason: CancelReason,
+    ) -> Vec<OrderChange> {
+        let mut changes = self.memory_pools.changes_pool.acquire();
+        self.cancel_resting_order(user, nonce, reason, &mut changes);
+        changes.take()
+    }
+
+    /// Test helper mirroring the pooled mass-cancel path of
+    /// [`OrderBook::execute`].
+    #[cfg(test)]
+    fn execute_mass_cancel(&mut self, user: Address, reason: CancelReason) -> Vec<OrderChange> {
+        let mut changes = self.memory_pools.changes_pool.acquire();
+        self.cancel_orders_by_user(user, reason, &mut changes);
+        changes.take()
     }
 }
 
@@ -2033,6 +2108,46 @@ mod tests {
         book.execute_cancel_order(&cancel).unwrap();
         assert!(book.state.bids.is_empty());
         assert!(book.state.user_orders.is_empty());
+    }
+
+    #[test]
+    fn test_cancel_by_settlement_removes_at_fault_order() {
+        let mut book = book();
+        book.execute_new_order(&buy(1, 1, 100, 10)).unwrap();
+        book.execute_new_order(&buy(1, 2, 100, 10)).unwrap();
+        let changes =
+            book.execute_settlement_cancel(addr(1), Nonce(1), CancelReason::SettlementFailed);
+        assert_eq!(
+            change_of(&changes, &buy(1, 1, 100, 10)),
+            Some(OrderStatus::Canceled {
+                filled_quantity: Quantity(0),
+                reason: CancelReason::SettlementFailed
+            })
+        );
+        // The other order of the same user stays in the book.
+        assert!(!book.state.index.contains_key(&(addr(1), Nonce(1))));
+        assert!(book.state.index.contains_key(&(addr(1), Nonce(2))));
+    }
+
+    #[test]
+    fn test_mass_cancel_by_user_removes_every_resting_order() {
+        let mut book = book();
+        book.execute_new_order(&buy(1, 1, 100, 10)).unwrap();
+        book.execute_new_order(&buy(1, 2, 100, 10)).unwrap();
+        book.execute_new_order(&buy(2, 1, 100, 10)).unwrap();
+        let changes = book.execute_mass_cancel(addr(1), CancelReason::SettlementFailed);
+        assert_eq!(changes.len(), 2);
+        assert!(changes.iter().all(|change| matches!(
+            *change.status(),
+            OrderStatus::Canceled { reason: CancelReason::SettlementFailed, .. }
+        )));
+        // The other user's order stays in the book.
+        assert!(!book.state.index.contains_key(&(addr(1), Nonce(1))));
+        assert!(!book.state.index.contains_key(&(addr(1), Nonce(2))));
+        assert!(book.state.index.contains_key(&(addr(2), Nonce(1))));
+        assert!(!book.state.user_orders.contains_key(&addr(1)));
+        let level = book.state.bids.get(&Price(100)).unwrap();
+        assert_eq!(level.visible_quantity(), Quantity(10));
     }
 
     // ---------------------------------------------------------------

@@ -174,8 +174,8 @@ error SettlementError(uint8 code, uint256 index, uint8 side);
 | 2 | `InsufficientMargin` | the trade would push an account's available margin below zero | remove the at-fault account's orders and block it until [SVD_Sync] observes recovered equity; the innocent side's crossed quantity is restored through the pre-trade pipeline |
 | 3 | `OrderFullySettled` | `filledQuantity + tradedQuantity` exceeds the order's total | treat as settled (idempotent double-submission), publish the result |
 | 4 | `OrderExpired` | `timestampMs` + lifetime is in the past | remove the expired order; the innocent side's crossed quantity is restored through the pre-trade pipeline |
-| 5 | `SymbolPaused` | the symbol is not accepting settlement | transient: retry with backoff, roll back on deadline |
-| 6 | `SettlementPaused` | the protocol is paused | transient: retry with backoff, roll back on deadline |
+| 5 | `SymbolPaused` | the symbol is not accepting settlement | transient: retry with backoff until the pause lifts — no outcome is published while the batch is pending |
+| 6 | `SettlementPaused` | the protocol is paused | transient: retry with backoff until the pause lifts — no outcome is published while the batch is pending |
 | 7 | `InvalidPrice` | the executed price violates the tick size or the taker's limit | remove the at-fault order (off-chain validation bug); the innocent side's crossed quantity is restored through the pre-trade pipeline |
 | 8 | `InvalidQuantity` | the quantity violates the lot size | remove the at-fault order; the innocent side's crossed quantity is restored through the pre-trade pipeline |
 
