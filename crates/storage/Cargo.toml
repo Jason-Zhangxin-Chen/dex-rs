@@ -6,3 +6,5 @@ license = "Apache-2.0"
 [dependencies]
 redis = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+memmap2 = { workspace = true }
+crc32fast = { workspace = true }
