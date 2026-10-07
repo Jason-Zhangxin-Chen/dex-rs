@@ -3,4 +3,57 @@ name = "svd-settlement"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
+
 [dependencies]
+primitives = { version = "0.1.0", path = "../primitives" }
+ipc = { version = "0.1.0", path = "../ipc" }
+storage = { version = "0.1.0", path = "../storage" }
+cache = { version = "0.1.0", path = "../cache" }
+util = { version = "0.1.0", path = "../util" }
+cryptography = { version = "0.1.0", path = "../cryptography" }
+
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+rmp-serde = { workspace = true }
+toml = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+signal-hook = { workspace = true }
+core_affinity = { workspace = true }
+k256 = { workspace = true }
+sha3 = { workspace = true }
+hex = "0.4"
+
+# The keystore crypto (Web3 Secret Storage v3): RustCrypto crates, all
+# MIT OR Apache-2.0 (deny.toml allow-list).
+scrypt = "0.11"
+aes = "0.8"
+ctr = "0.9"
+pbkdf2 = "0.12"
+hmac = "0.12"
+sha2 = "0.10"
+zeroize = "1"
+
+# The SQL cluster writer. No compile-time query macros on purpose: the
+# queries are plain strings, so no DATABASE_URL is needed at build time.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "mysql"] }
+
+# The chain interop: one meta crate with an explicit minimal feature set.
+alloy = { workspace = true, default-features = false, features = [
+    "std",
+    "providers",
+    "provider-http",
+    "reqwest",
+    "reqwest-rustls-tls",
+    "rpc-types",
+    "signer-local",
+    "sol-types",
+    "contract",
+] }
+
+[features]
+default = ["chain-alloy"]
+# Compiles the alloy implementation (abi, rpc pool, chain client). Off by
+# `--no-default-features` for the fast, offline, mock-only test loop.
+chain-alloy = []
