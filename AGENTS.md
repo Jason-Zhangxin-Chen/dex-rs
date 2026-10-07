@@ -78,7 +78,6 @@ The responsibility of an [SVD_OMS_Master] is that, it executes the user request,
 | `crates/cache` | common cache libs which place object pool, etc... |
 | `crates/cryptography` | common cryptography libs which place hashing, signature signing and verifications, etc... |
 | `crates/ipc` | common libs which place IPC functions like shared memory SPSC queue, etc... |
-| `crates/net` | common libs which place networking helpers like web socket, https, etc... |
 | `crates/primitives` | Core matching-engine types: order model, order book, risk, STP, trades, events, etc... |
 | `crates/storage` | helpers for redis cluster and SQL cluster I/O. |
 | `crates/svd-oms` | The oms service which runs for different mode: master or slave. |

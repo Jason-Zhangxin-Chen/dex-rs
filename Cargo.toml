@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/cache", "crates/ipc", "crates/cryptography","crates/net", "crates/primitives", "crates/storage", "crates/svd-oms", "crates/svd-pretrade", "crates/svd-settlement", "crates/svd-sync", "crates/util", "crates/svd-query", "crates/svd-pubsub"]
+members = ["crates/cache", "crates/ipc", "crates/cryptography", "crates/primitives", "crates/storage", "crates/svd-oms", "crates/svd-pretrade", "crates/svd-settlement", "crates/svd-sync", "crates/util", "crates/svd-query", "crates/svd-pubsub"]
 
 [workspace.dependencies]
 alloy = "2.5.0"
