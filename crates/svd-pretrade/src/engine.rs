@@ -23,7 +23,7 @@ use crossbeam_queue::ArrayQueue;
 use ipc::mmap_spsc::SpscQueue;
 use primitives::message::hot_path::{CancelOrder, OrderMsg, PipelineMsg};
 use storage::RedisKeyStore;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use util::pin;
 use util::time::now_ms;
 
@@ -31,6 +31,10 @@ use util::time::now_ms;
 const SPINS_PER_YIELD: u32 = 4096;
 /// The poll interval of the graceful shutdown watch, in milliseconds.
 const SHUTDOWN_POLL_MS: u64 = 100;
+/// The drain grace of the shutdown, in milliseconds: how long the core
+/// thread keeps pushing the pending messages into the egress after the
+/// shutdown before it gives up and drops them.
+const SHUTDOWN_DRAIN_MS: u64 = 1000;
 
 /// Errors of the pre-trade engine.
 #[derive(Debug)]
@@ -160,7 +164,13 @@ impl Runtime {
             .name("pretrade-core".to_string())
             .spawn(move || {
                 pin::pin_current_thread(core_config.core_id);
-                spin(core_queue, &core_config.egress, core_config.batch_size, core_shutdown);
+                spin(
+                    core_queue,
+                    &core_config.egress,
+                    core_config.batch_size,
+                    SHUTDOWN_DRAIN_MS,
+                    core_shutdown,
+                );
             })
             .map_err(|err| EngineError::Runtime(format!("cannot spawn the core thread: {err}")))?;
 
@@ -202,10 +212,18 @@ impl Runtime {
 /// batch buffer is pre-allocated once; the messages are fixed-size `Copy`
 /// values, so every move is a plain memory copy into the pre-allocated
 /// queue slots — no checks, no locks, no blocking, no allocation.
+///
+/// The shutdown drains the queue: the in-process MPSC queue is not backed
+/// by any storage, so the pending messages must leave it before the loop
+/// exits — the gateway stops producing before this thread joins, and the
+/// egress queue is file mapped, so the messages survive the process there.
+/// The drain runs within a grace period: when the egress stays full past it
+/// (the downstream stopped consuming), the pending messages are dropped.
 fn spin(
     queue: Arc<ArrayQueue<PipelineMsg>>,
     egress_config: &crate::config::SpScConfig,
     batch_size: usize,
+    drain_grace_ms: u64,
     shutdown: Arc<AtomicBool>,
 ) {
     let mut egress = match SpscQueue::<PipelineMsg>::open(
@@ -224,11 +242,11 @@ fn spin(
         PipelineMsg::User(OrderMsg::CancelOrder(CancelOrder::default()))
     });
     let mut empty_spins = 0u32;
+    // The deadline of the shutdown drain, armed when the shutdown is first
+    // observed while a batch still waits for the egress capacity.
+    let mut drain_deadline: Option<u64> = None;
     info!("the forwarding core loop started");
-    loop {
-        if shutdown.load(Ordering::Relaxed) {
-            break;
-        }
+    'core: loop {
         let mut n = 0usize;
         while n < batch_size {
             match queue.pop() {
@@ -244,12 +262,26 @@ fn spin(
             while pushed < n {
                 pushed += egress.push_batch(&batch[pushed..n]);
                 if pushed < n {
-                    if shutdown.load(Ordering::Relaxed) {
-                        return;
+                    if shutdown.load(Ordering::Relaxed) && drain_deadline.is_none() {
+                        drain_deadline = Some(now_ms() + drain_grace_ms);
+                    }
+                    if drain_deadline.is_some_and(|deadline| now_ms() > deadline) {
+                        // The egress stayed full past the grace: the
+                        // downstream stopped consuming, the pending messages
+                        // cannot leave and are lost with the process.
+                        warn!(
+                            pending = n - pushed + queue.len(),
+                            "the shutdown drain grace expired, dropping the pending messages"
+                        );
+                        break 'core;
                     }
                     std::thread::yield_now();
                 }
             }
+        } else if shutdown.load(Ordering::Relaxed) {
+            // The queue is empty and the producers stopped (the gateway shut
+            // down before this thread joins), the drain is complete.
+            break;
         } else {
             std::hint::spin_loop();
             empty_spins += 1;
@@ -330,7 +362,7 @@ mod tests {
             // Drain the egress after the spin processes the batch: a second
             // consumer thread reads what the spin pushed.
             let spin_queue = spin_queue;
-            spin(spin_queue, &config, 16, spin_shutdown);
+            spin(spin_queue, &config, 16, 1000, spin_shutdown);
             // Signal completion by draining through this thread instead.
             let mut egress = SpscQueue::<PipelineMsg>::open(&spin_path, 64, false).unwrap();
             let mut batch =
@@ -344,5 +376,81 @@ mod tests {
         shutdown.store(true, Ordering::Relaxed);
         handle.join().unwrap();
         assert_eq!(forwarded.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn test_spin_drains_the_pending_messages_on_shutdown() {
+        let path = std::env::temp_dir().join(format!("dex_pretrade_drain_{}", std::process::id()));
+        let _guard = {
+            struct Guard(std::path::PathBuf);
+            impl Drop for Guard {
+                fn drop(&mut self) {
+                    let _ = std::fs::remove_file(&self.0);
+                }
+            }
+            Guard(path.clone())
+        };
+        // More pending messages than one batch, and the shutdown is already
+        // set when the loop starts: the drain must still move them all.
+        let queue = Arc::new(ArrayQueue::<PipelineMsg>::new(64));
+        for nonce in 1..=20 {
+            queue
+                .push(PipelineMsg::User(OrderMsg::NewOrder(order(1, nonce))))
+                .expect("the queue has capacity");
+        }
+        let spin_path = path.clone();
+        let spin_queue = Arc::clone(&queue);
+        let handle = std::thread::spawn(move || {
+            let config = crate::config::SpScConfig {
+                path: spin_path.to_string_lossy().into_owned(),
+                capacity: 64,
+                create: true,
+            };
+            spin(spin_queue, &config, 16, 1000, Arc::new(AtomicBool::new(true)));
+            // Read what the drain pushed into the egress.
+            let mut egress = SpscQueue::<PipelineMsg>::open(&spin_path, 64, false).unwrap();
+            let mut batch =
+                vec![PipelineMsg::User(OrderMsg::CancelOrder(CancelOrder::default())); 32];
+            egress.pop_batch(&mut batch)
+        });
+        assert_eq!(handle.join().unwrap(), 20);
+    }
+
+    #[test]
+    fn test_spin_drops_the_pending_messages_when_the_egress_stays_full() {
+        let path = std::env::temp_dir().join(format!("dex_pretrade_grace_{}", std::process::id()));
+        let _guard = {
+            struct Guard(std::path::PathBuf);
+            impl Drop for Guard {
+                fn drop(&mut self) {
+                    let _ = std::fs::remove_file(&self.0);
+                }
+            }
+            Guard(path.clone())
+        };
+        let queue = Arc::new(ArrayQueue::<PipelineMsg>::new(64));
+        for nonce in 1..=6 {
+            queue
+                .push(PipelineMsg::User(OrderMsg::NewOrder(order(1, nonce))))
+                .expect("the queue has capacity");
+        }
+        let spin_path = path.clone();
+        let spin_queue = Arc::clone(&queue);
+        let handle = std::thread::spawn(move || {
+            // The egress holds two messages (the queue keeps one slot free)
+            // and nobody consumes it: the drain pushes two, then drops the
+            // rest when the short grace expires.
+            let config = crate::config::SpScConfig {
+                path: spin_path.to_string_lossy().into_owned(),
+                capacity: 3,
+                create: true,
+            };
+            spin(spin_queue, &config, 16, 50, Arc::new(AtomicBool::new(true)));
+            let mut egress = SpscQueue::<PipelineMsg>::open(&spin_path, 3, false).unwrap();
+            let mut batch =
+                vec![PipelineMsg::User(OrderMsg::CancelOrder(CancelOrder::default())); 16];
+            egress.pop_batch(&mut batch)
+        });
+        assert_eq!(handle.join().unwrap(), 2);
     }
 }
