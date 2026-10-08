@@ -29,9 +29,6 @@ pub enum Action {
         /// The decoded failure to publish.
         reason: SettlementFailure,
     },
-    /// The trade was already settled on-chain (a duplicated submission): the
-    /// batch is final and its outcome is `Settled`.
-    TreatAsSettled,
     /// The failure is transient or cannot be explained: the batch stays
     /// pending and is retried with backoff, and no outcome is published
     /// while it is pending.
@@ -63,9 +60,8 @@ pub enum RetryReason {
 ///
 /// | code | index / side | action |
 /// | --- | --- | --- |
-/// | 1, 2, 4, 7, 8 | `index < trades_len` and `side` is 1 or 2 | [`Action::Revert`] |
-/// | 1, 2, 4, 7, 8 | `index >= trades_len` or `side` is neither 1 nor 2 | [`Action::Retry`] with [`RetryReason::Unclassified`] |
-/// | 3 | any | [`Action::TreatAsSettled`] |
+/// | 1, 2 | `index < trades_len` and `side` is 1 or 2 | [`Action::Revert`] |
+/// | 1, 2 | `index >= trades_len` or `side` is neither 1 nor 2 | [`Action::Retry`] with [`RetryReason::Unclassified`] |
 /// | 5, 6 | any | [`Action::Retry`] with [`RetryReason::Paused`] |
 /// | anything else | any | [`Action::Retry`] with [`RetryReason::Unclassified`] |
 ///
@@ -73,15 +69,12 @@ pub enum RetryReason {
 /// the caller passes that batch's length as `trades_len`.
 pub fn classify(code: u8, index: usize, side: u8, trades_len: usize) -> Action {
     match code {
-        // The idempotent double-submission path: the trade is already
-        // settled, so the batch is final regardless of index and side.
-        3 => Action::TreatAsSettled,
         // Transient: the protocol is not accepting settlement.
         5 | 6 => Action::Retry { reason: RetryReason::Paused },
         // Deterministic: the code names one failing trade, and the index and
         // the side say which. A code the protocol never pairs with them is
         // unclassifiable rather than a guess.
-        1 | 2 | 4 | 7 | 8 => match (index < trades_len, fault_side(side)) {
+        1 | 2 => match (index < trades_len, fault_side(side)) {
             (true, Some(at_fault)) => Action::Revert {
                 failed_trade: index,
                 at_fault,
@@ -222,13 +215,10 @@ mod tests {
             2 => Some(FaultSide::Maker),
             _ => None,
         };
-        if code == 3 {
-            return Action::TreatAsSettled;
-        }
         if code == 5 || code == 6 {
             return Action::Retry { reason: RetryReason::Paused };
         }
-        let deterministic = matches!(code, 1 | 2 | 4 | 7 | 8);
+        let deterministic = matches!(code, 1 | 2);
         match (deterministic && index < trades_len, at_fault) {
             (true, Some(at_fault)) => Action::Revert {
                 failed_trade: index,
@@ -262,7 +252,7 @@ mod tests {
     #[test]
     fn test_classify_canonical_rows() {
         // A deterministic failure with a valid index and side reverts.
-        for code in [1u8, 2, 4, 7, 8] {
+        for code in [1u8, 2] {
             assert_eq!(
                 classify(code, 1, 1, 2),
                 Action::Revert {
@@ -292,12 +282,6 @@ mod tests {
                     classify(code, 0, side, 1),
                     Action::Retry { reason: RetryReason::Unclassified }
                 );
-            }
-        }
-        // The double submission is settled whatever the data says.
-        for index in [0usize, 7, usize::MAX] {
-            for side in 0..=3u8 {
-                assert_eq!(classify(3, index, side, 0), Action::TreatAsSettled);
             }
         }
         // A pause is transient whatever the data says.
@@ -355,7 +339,7 @@ mod tests {
         for len in 1..=8usize {
             let trades: Vec<Trade> = (0..len).map(trade).collect();
             for index in 0..len {
-                for (code, side) in [(2u8, 1u8), (1, 2), (4, 1), (8, 2)] {
+                for (code, side) in [(2u8, 1u8), (1, 2)] {
                     let plan = plan_isolation(&trades, code, index, side);
                     // The poison is the singleton failing trade.
                     assert_eq!(plan.poison, vec![trades[index]], "len {len}, index {index}");
@@ -435,10 +419,13 @@ mod tests {
     #[test]
     fn test_plan_isolation_action_follows_the_table() {
         // The action is classified for the isolated singleton: the transient
-        // and idempotent codes stay retry / settled even when a Revert row
-        // would have matched a batch-level classify.
+        // codes stay retry even when a Revert row would have matched a
+        // batch-level classify, and a retired protocol code is unclassifiable.
         let trades: Vec<Trade> = (0..4).map(trade).collect();
-        assert_eq!(plan_isolation(&trades, 3, 1, 1).action, Action::TreatAsSettled);
+        assert_eq!(
+            plan_isolation(&trades, 3, 1, 1).action,
+            Action::Retry { reason: RetryReason::Unclassified }
+        );
         assert_eq!(
             plan_isolation(&trades, 6, 1, 1).action,
             Action::Retry { reason: RetryReason::Paused }

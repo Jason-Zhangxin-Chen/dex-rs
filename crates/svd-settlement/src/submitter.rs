@@ -7,8 +7,7 @@
 //! two batches never submit concurrently. The journal lags reality, never
 //! leads it: a state is journaled only after the chain action it describes
 //! was taken or observed, so a crash may repeat an action (a duplicate
-//! submit is absorbed by the protocol's `OrderFullySettled` code) but never
-//! skips one.
+//! submit, a re-observed state) but never skips one.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -319,13 +318,6 @@ fn observe(
         }
         TxState::Reverted { code, index, side } => {
             match classify(code, index, side, batch.trades.len()) {
-                Action::TreatAsSettled => {
-                    // The idempotent double-submission path: the trades
-                    // already settled. The block is unknown here (0 = the
-                    // published result carries no block number).
-                    journal_state(journal, batch.seq, BatchState::Confirmed { tx, block: 0 });
-                    batch.state = BatchState::Confirmed { tx, block: 0 };
-                }
                 Action::Revert { failed_trade, at_fault, reason } => {
                     if batch.trades.len() == 1 {
                         journal_state(

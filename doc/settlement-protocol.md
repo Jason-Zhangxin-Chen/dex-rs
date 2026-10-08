@@ -128,10 +128,6 @@ interface ISettlement {
     /// reverts the whole batch with the index and the reason.
     function settleBatch(MatchedTrade[] calldata trades) external;
 
-    /// The filled quantity of an order (keyed by its hash), for the
-    /// partial-fill and duplicate-settlement guards.
-    function filledQuantity(bytes32 orderHash) external view returns (uint64);
-
     /// Per-symbol configuration, set by the operator. The off-chain configs
     /// of [SVD_Pretrade] and [SVD_OMS_Master] must be kept in lockstep with
     /// these (an ops invariant, see the pre-trade spec).
@@ -175,12 +171,13 @@ error SettlementError(uint8 code, uint256 index, uint8 side);
 | --- | --- | --- | --- |
 | 1 | `InvalidSignature` | a party's signature does not recover to the order's user | remove the at-fault order (cancel it on the book); the innocent side's crossed quantity is restored through the pre-trade pipeline — never retry |
 | 2 | `InsufficientMargin` | the trade would push an account's available margin below zero | remove the at-fault account's orders and block it until [SVD_Sync] observes recovered equity; the innocent side's crossed quantity is restored through the pre-trade pipeline |
-| 3 | `OrderFullySettled` | `filledQuantity + tradedQuantity` exceeds the order's total | treat as settled (idempotent double-submission), publish the result |
-| 4 | `OrderExpired` | `timestampMs` + lifetime is in the past | remove the expired order; the innocent side's crossed quantity is restored through the pre-trade pipeline |
 | 5 | `SymbolPaused` | the symbol is not accepting settlement | transient: retry with backoff until the pause lifts — no outcome is published while the batch is pending |
 | 6 | `SettlementPaused` | the protocol is paused | transient: retry with backoff until the pause lifts — no outcome is published while the batch is pending |
-| 7 | `InvalidPrice` | the executed price violates the tick size or the taker's limit | remove the at-fault order (off-chain validation bug); the innocent side's crossed quantity is restored through the pre-trade pipeline |
-| 8 | `InvalidQuantity` | the quantity violates the lot size | remove the at-fault order; the innocent side's crossed quantity is restored through the pre-trade pipeline |
+
+The taxonomy is deliberately short: the contract is **stateless** per order — it keeps no
+filled-quantity ledger, so it cannot detect a duplicate settlement, an expired order, or an
+invalid price / quantity. Those validations belong to the off-chain book
+([SVD_OMS_Master] is the single source of truth), and the codes for them do not exist.
 
 ## settleBatch semantics
 
@@ -190,16 +187,18 @@ For each trade in the batch, in order:
    carry the same symbol.
 2. **Signature check** — `ecrecover` both signatures against the EIP-712
    order hash; the recovered addresses must equal the orders' users.
-3. **Lifecycle check** — `filledQuantity[hash] + tradedQuantity ≤
-   totalQuantity` for both orders, and the taker's `takerRemaining` matches
-   `totalQuantity − filled − traded` (the off-chain engine's view).
-4. **Margin check and apply** — compute the notional from the executed
+3. **Margin check and apply** — compute the notional from the executed
    price, apply the fees, update both positions, and compute the used
    margin after; revert with `InsufficientMargin` if either account's
    available margin would fall below zero. Mutating the margin state
-   emits `MarginAccountUpdated` for both accounts.
-5. **Lifecycle update** — accumulate `filledQuantity` for both orders and
-   emit `TradeSettled`.
+   emits `MarginAccountUpdated` for both accounts, and a settled trade
+   emits `TradeSettled`.
+
+There is no order-lifecycle step: the contract keeps no per-order state (no
+filled-quantity ledger), so it settles whatever the operator submits whose
+signatures recover and whose margin holds — the off-chain book
+([SVD_OMS_Master]) is the single source of truth for fill accounting, order
+expiry and price / quantity validation.
 
 Any failing trade reverts the whole batch (all-or-nothing) with
 `SettlementError(code, index)`. The [SVD_Settlement] service exploits the
@@ -211,6 +210,12 @@ the failing half.
 
 - **Order admission** — orders never enter the chain; the chain sees a trade
   only after the off-chain engine matched it. The contract has no order book.
+- **Order lifecycle and trade validation** — the contract is stateless per
+  order: it tracks no filled quantities and checks no timestamps, prices or
+  quantities, so it cannot detect a duplicate settlement, an expired order or
+  a bad trade. Those validations are the off-chain book's job; the
+  [SVD_Settlement] journal's at-most-once publication is the
+  duplicate-submission guard on the operator side.
 - **Off-chain margin checks** — [SVD_Pretrade] checks the orders against the
   latest synced margin state without off-chain reservations (a reservation
   mechanism may be added later): the sync window tolerates over-subscription,
