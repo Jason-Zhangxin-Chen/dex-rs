@@ -4,7 +4,7 @@ the trade events of the [SVD_OMS_Master] from the share memory SPSC queue, batch
 the batches to the on-chain settlement protocol (the assumed interfaces in
 doc/settlement-protocol.md), listens to the results, and decides what the result means for the
 book. A settled trade is final. A failed trade is classified: the deterministic failures remove
-the orders (they must never trade again — forged signature, exhausted margin, expired order), and the
+the orders (they must never trade again — forged signature, exhausted margin), and the
 transient failures are retried until they resolve — the [SVD_Settlement] never drops a batch, so the
 book stays the source of truth for the pending crosses while the chain recovers. Every result is
 published to the [Redis_Cluster] and the
@@ -60,12 +60,15 @@ of the [SVD_Settlement] spins on the queue:
 | mined & confirmed | the batch settled | publish `Settled`, write the SQL rows |
 | `SettlementError` code 1 `InvalidSignature` | a party's signature does not recover | the at-fault order is forged: publish the `Reverted` result — the [SVD_Pretrade] pushes `CancelBySettlement` for the at-fault order and re-injects the innocent side's crossed quantity into the pipeline; never retry |
 | code 2 `InsufficientMargin` | an account's available margin is exhausted on-chain | the at-fault account must not trade: publish the `Reverted` result — the [SVD_Pretrade] pushes `MassCancelByUser` (all its resting orders leave the book), re-injects the innocent side's crossed quantity into the pipeline and blocks the at-fault account until a fresh margin update arrives for it (any fresh state clears the block and decides the admission on its own from then on) |
-| code 3 `OrderFullySettled` | the trade was already settled (double submission) | treat as settled: publish `Settled` — the idempotent path |
-| code 4 `OrderExpired` | the order's lifetime passed | publish the `Reverted` result — the [SVD_Pretrade] pushes `CancelBySettlement` for the expired order and re-injects the innocent side's crossed quantity into the pipeline |
 | code 5 / 6 `SymbolPaused` / `SettlementPaused` | the protocol is not accepting | transient: retry the batch with backoff until the pause lifts — the batch stays pending, no outcome is published |
-| code 7 / 8 `InvalidPrice` / `InvalidQuantity` | the off-chain validation failed to catch a bad trade | publish the `Reverted` result — the [SVD_Pretrade] pushes `CancelBySettlement` for the at-fault order and re-injects the innocent side's crossed quantity into the pipeline (a bug to alarm on) |
 | tx-level failure (RPC error, gas, nonce gap, reorg) | the transaction never settled | retry the submission with backoff and gas re-pricing until it lands — the batch stays pending |
 | unclassifiable revert | unknown code or missing revert data | conservative: retry the batch with backoff (the revert stays unexplained — an alarm to page on); the symbol's settlement journal stalls behind the batch until it resolves |
+
+The on-chain protocol is stateless: it tracks no filled quantities and validates no order
+timestamps or prices — the [SVD_OMS_Master] book is the single source of truth for those. The
+failure taxonomy therefore carries no `OrderFullySettled`, `OrderExpired` or
+`InvalidPrice` / `InvalidQuantity` codes; a revert carrying a code outside the table is
+unclassifiable and takes the conservative retry path above.
 
 A batch fails as a whole (the on-chain `settleBatch` is all-or-nothing and the revert data names
 the failing trade index). To isolate one bad trade the [SVD_Settlement] **binary-splits** the batch:

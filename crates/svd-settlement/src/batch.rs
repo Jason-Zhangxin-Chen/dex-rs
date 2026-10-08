@@ -3,10 +3,10 @@
 //!
 //! Every transition of a batch is appended to the settlement journal
 //! before the submitter acts on it — the journal lags reality, never leads
-//! it — so a crash may repeat an already-taken action (a duplicate submit
-//! is absorbed by the protocol's `OrderFullySettled` code) but never skips
-//! one. The assembler and the crash replay live in this module; the drive
-//! loop that executes the transitions lives in [`crate::submitter`].
+//! it — so a crash may repeat an already-taken action (a duplicate submit)
+//! but never skips one. The assembler and the crash replay live in this
+//! module; the drive loop that executes the transitions lives in
+//! [`crate::submitter`].
 
 use std::time::Duration;
 
@@ -863,9 +863,8 @@ mod tests {
 
         let state = journal.restart(symbol);
         // The parent re-enters the pending set with its pre-split state: it
-        // is re-submitted as a whole, and the duplicate settlement that may
-        // follow is absorbed by the protocol's `OrderFullySettled` path. The
-        // split repeats harmlessly because the children settle as a subset.
+        // is re-submitted as a whole, and the split repeats harmlessly
+        // because the children settle as a subset.
         assert_eq!(state.pending.iter().map(|batch| batch.seq).collect::<Vec<_>>(), vec![2, 5, 6]);
         assert_eq!(state.pending[0].state, BatchState::Submitted { tx, nonce: 5 });
         assert!(state.outcomes.is_empty());

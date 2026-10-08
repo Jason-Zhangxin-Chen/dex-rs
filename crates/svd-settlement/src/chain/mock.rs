@@ -374,11 +374,11 @@ mod tests {
 
     #[test]
     fn test_scenario_revert_with() {
-        let chain = MockChain::scenario_revert_with(3, 7, 1);
+        let chain = MockChain::scenario_revert_with(2, 7, 1);
         let tx = chain.submit(b"batch-2").unwrap();
         assert_eq!(
             chain.tx_state(tx.tx_hash).unwrap(),
-            TxState::Reverted { code: 3, index: 7, side: 1 }
+            TxState::Reverted { code: 2, index: 7, side: 1 }
         );
         assert_eq!(chain.scripted_left(), 0);
     }
