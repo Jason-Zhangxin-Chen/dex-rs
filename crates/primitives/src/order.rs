@@ -8,7 +8,7 @@ use crate::value::{Price, Quantity, TimestampMs};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 
-/// Index into the area, cast usize to u32 to make it catch line friendly since
+/// Index into the area, cast usize to u32 to make it cache line friendly since
 /// 4_294_967_295 is sufficient for the book size.
 pub type OrderIdx = u32;
 
@@ -71,7 +71,7 @@ impl From<OrderNode> for Order {
 ///
 /// `prev` and `next` are book-internal links used for time priority within a
 /// price level. They are serialized as part of the snapshot so a restored book
-/// preserves its linked-list structure exactly. On the wire (Kafka, Redpanda),
+/// preserves its linked-list structure exactly. On the wire (Kafka, Redpanda or IPC msg queue),
 /// producers should set them to `NIL`; the engine overwrites them when the
 /// order is inserted into a price level.
 #[repr(C, align(64))]
