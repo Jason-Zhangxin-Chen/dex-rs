@@ -10,7 +10,6 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -344,15 +343,14 @@ impl SettlementSql for Arc<Mutex<RecordingSql>> {
 /// drains the results from `rx` and writes them through the [`SettlementSql`]
 /// impl, retrying every failure forever.
 ///
-/// The thread stops when the engine drops the sender end of `rx`, or when
-/// `shutdown` is set — the check runs before every write attempt, including
-/// the attempts of a retry in flight; the unwritten results stay in the
-/// journal and are replayed on the next start, where `INSERT IGNORE` absorbs
-/// the repeats.
+/// The thread stops when the engine drops the sender end of `rx`. The
+/// write is the "delivered to the SQL writer" threshold of the submitter's
+/// frame ack: a crash can still lose the unwritten rows (the accepted
+/// at-least-once trade-off — the results are the authoritative truth in the
+/// Redis cluster).
 pub fn spawn_sql_writer(
     rx: Receiver<SettlementResult>,
     mut sql: Box<dyn SettlementSql>,
-    shutdown: Arc<AtomicBool>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new().name(THREAD_NAME.to_string()).spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
@@ -364,15 +362,9 @@ pub fn spawn_sql_writer(
         };
         runtime.block_on(async move {
             info!("the sql writer started");
-            'write: while let Ok(result) = rx.recv() {
-                if shutdown.load(Ordering::Relaxed) {
-                    break;
-                }
+            while let Ok(result) = rx.recv() {
                 let mut attempt = 0u32;
                 loop {
-                    if shutdown.load(Ordering::Relaxed) {
-                        break 'write;
-                    }
                     let written = match result.outcome {
                         SettlementOutcome::Settled => sql.write_settled(&result).await,
                         SettlementOutcome::Reverted { .. } => sql.write_reverted(&result).await,
@@ -395,7 +387,7 @@ pub fn spawn_sql_writer(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::channel;
     use std::time::{Duration, Instant};
 
@@ -481,15 +473,6 @@ mod tests {
         handle.join().expect("the sql writer thread does not panic");
     }
 
-    /// Waits until `predicate` holds, panicking on the timeout.
-    fn wait_until(mut predicate: impl FnMut() -> bool, timeout: Duration) {
-        let deadline = Instant::now() + timeout;
-        while !predicate() {
-            assert!(Instant::now() < deadline, "the condition was not reached in time");
-            std::thread::sleep(Duration::from_millis(2));
-        }
-    }
-
     /// A [`SettlementSql`] that fails the first `failures` writes with an
     /// injected query error and then accepts them into a shared
     /// [`RecordingSql`].
@@ -550,9 +533,8 @@ mod tests {
     fn test_writer_dispatches_the_settled_result() {
         let recorded = Arc::new(Mutex::new(RecordingSql::default()));
         let (tx, rx) = channel();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let handle = spawn_sql_writer(rx, Box::new(Arc::clone(&recorded)), Arc::clone(&shutdown))
-            .expect("the thread spawns");
+        let handle =
+            spawn_sql_writer(rx, Box::new(Arc::clone(&recorded))).expect("the thread spawns");
 
         let result = settled_result(7);
         tx.send(result.clone()).expect("the writer is alive");
@@ -568,9 +550,8 @@ mod tests {
     fn test_writer_dispatches_the_reverted_result() {
         let recorded = Arc::new(Mutex::new(RecordingSql::default()));
         let (tx, rx) = channel();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let handle = spawn_sql_writer(rx, Box::new(Arc::clone(&recorded)), Arc::clone(&shutdown))
-            .expect("the thread spawns");
+        let handle =
+            spawn_sql_writer(rx, Box::new(Arc::clone(&recorded))).expect("the thread spawns");
 
         let result = reverted_result(8);
         tx.send(result.clone()).expect("the writer is alive");
@@ -586,9 +567,7 @@ mod tests {
     fn test_writer_retries_until_the_write_succeeds() {
         let (sql, attempts, recorded) = FailingSql::new(2);
         let (tx, rx) = channel();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let handle =
-            spawn_sql_writer(rx, Box::new(sql), Arc::clone(&shutdown)).expect("the thread spawns");
+        let handle = spawn_sql_writer(rx, Box::new(sql)).expect("the thread spawns");
 
         let result = settled_result(9);
         tx.send(result.clone()).expect("the writer is alive");
@@ -600,33 +579,11 @@ mod tests {
     }
 
     #[test]
-    fn test_writer_shutdown_during_retry_exits_without_writing() {
-        // The impl never accepts: the thread sits in the retry loop until the
-        // shutdown flag is raised, and the result is left to the journal
-        // replay of the next start.
-        let (sql, attempts, recorded) = FailingSql::new(usize::MAX);
-        let (tx, rx) = channel();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let handle =
-            spawn_sql_writer(rx, Box::new(sql), Arc::clone(&shutdown)).expect("the thread spawns");
-
-        tx.send(reverted_result(10)).expect("the writer is alive");
-        wait_until(|| attempts.load(Ordering::SeqCst) >= 1, Duration::from_secs(5));
-        shutdown.store(true, Ordering::Relaxed);
-        join_within(handle, Duration::from_secs(5));
-
-        let recorded = recorded.lock().expect("the recording sql mutex");
-        assert!(recorded.settled.is_empty());
-        assert!(recorded.reverted.is_empty());
-    }
-
-    #[test]
     fn test_writer_exits_when_the_channel_drops() {
         let recorded = Arc::new(Mutex::new(RecordingSql::default()));
         let (tx, rx) = channel();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let handle = spawn_sql_writer(rx, Box::new(Arc::clone(&recorded)), Arc::clone(&shutdown))
-            .expect("the thread spawns");
+        let handle =
+            spawn_sql_writer(rx, Box::new(Arc::clone(&recorded))).expect("the thread spawns");
 
         drop(tx);
         join_within(handle, Duration::from_secs(5));

@@ -230,8 +230,9 @@ fn test_replay_is_idempotent() -> Result<(), Box<dyn std::error::Error>> {
     run_test(replay_is_idempotent)
 }
 
-/// Writes the same settled result three times (the replay shape: the journal
-/// re-publishes after a crash) and asserts the unique keys absorbed the
+/// Writes the same settled result three times (the re-processing shape: a
+/// crash between the confirmation and the frame ack re-publishes the result
+/// with the same batch sequence) and asserts the unique keys absorbed the
 /// repeats.
 async fn replay_is_idempotent(url: String) -> Result<(), Box<dyn std::error::Error>> {
     let symbol = Symbol([0x22; 32]);

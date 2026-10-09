@@ -1,17 +1,19 @@
 //! The result publisher: serializes the `SettlementResult` messages and
 //! publishes them to the Redis cluster with an at-least-once retry.
 //!
-//! The publisher runs on its own thread, never on the hot path. The retry
-//! loop never gives up on a Redis outage: the results queue up in the
-//! channel while the publication is suspended, and the shutdown flag is
-//! checked before every attempt, so a shutdown in the middle of a retry
-//! returns at once — the journal replay re-publishes the unwritten results
-//! on the next start. A result that cannot be encoded is logged and skipped
-//! for the same reason: it stays in the journal and re-publishes later.
+//! The publisher runs on its own thread, never on the hot path. Every
+//! message carries a confirm sender: the publisher sends `()` on it after
+//! the Redis write succeeds, so the submitter releases the batch frame only
+//! once its result is durably published. The retry loop never gives up on a
+//! Redis outage: the results queue up in the channel while the publication
+//! is suspended, and a shutdown in the middle of a retry waits for the
+//! storage to recover (a SIGKILL is safe — the unacked frames replay on the
+//! next start). The thread exits when the engine drops the sender end of
+//! the channel. A result that cannot be encoded is confirmed with an error
+//! log — the encoding cannot realistically fail on a `SettlementResult`,
+//! and an unconfirmed frame would stall the submitter forever.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
 use primitives::message::settlement::SettlementResult;
@@ -27,38 +29,34 @@ const RETRY_MAX_MS: u64 = 10_000;
 /// The name of the publisher thread.
 const THREAD_NAME: &str = "stl-publisher";
 
-/// Spawns the result publisher thread: it drains the results from `rx`,
-/// serializes them and publishes the payloads to the [`ChangeSink`] with an
-/// at-least-once retry.
+/// Spawns the result publisher thread: it drains the `(result, confirm)`
+/// messages from `rx`, serializes them, publishes the payloads to the
+/// [`ChangeSink`] with an at-least-once retry and confirms each write.
 ///
-/// The thread stops when the engine drops the sender end of `rx`, or when
-/// `shutdown` is set — a shutdown is honoured before every publish attempt,
-/// including the attempts of a retry in flight.
+/// The thread stops when the engine drops the sender end of `rx`.
 pub fn spawn_publisher(
-    rx: Receiver<SettlementResult>,
+    rx: Receiver<(SettlementResult, Sender<()>)>,
     mut sink: Box<dyn ChangeSink + Send>,
-    shutdown: Arc<AtomicBool>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new().name(THREAD_NAME.to_string()).spawn(move || {
         info!("the result publisher started");
-        'publish: while let Ok(result) = rx.recv() {
-            if shutdown.load(Ordering::Relaxed) {
-                break;
-            }
+        while let Ok((result, confirm)) = rx.recv() {
             let bytes = match rmp_serde::to_vec(&result) {
                 Ok(bytes) => bytes,
                 Err(err) => {
-                    error!(error = %err, batch_seq = result.batch_seq, "cannot encode the settlement result");
+                    // The encoding cannot realistically fail here: confirm
+                    // anyway so the submitter does not stall forever.
+                    error!(
+                        error = %err,
+                        batch_seq = result.batch_seq,
+                        "cannot encode the settlement result, dropping it"
+                    );
+                    let _ = confirm.send(());
                     continue;
                 }
             };
             let mut attempt = 0u32;
             loop {
-                // The check runs before every attempt, so a shutdown during
-                // the backoff sleep stops the thread on the next iteration.
-                if shutdown.load(Ordering::Relaxed) {
-                    break 'publish;
-                }
                 match sink.publish_change(&bytes) {
                     Ok(()) => break,
                     Err(err) => {
@@ -69,6 +67,7 @@ pub fn spawn_publisher(
                     }
                 }
             }
+            let _ = confirm.send(());
         }
         info!("the result publisher stopped");
     })
@@ -76,8 +75,8 @@ pub fn spawn_publisher(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-    use std::sync::mpsc::channel;
+    use std::sync::mpsc::{Receiver, Sender, channel};
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use primitives::base::{Hash32, Symbol};
@@ -145,6 +144,14 @@ mod tests {
         }
     }
 
+    /// Sends one `(result, confirm)` message and returns the confirm
+    /// receiver.
+    fn send(tx: &Sender<(SettlementResult, Sender<()>)>, input: SettlementResult) -> Receiver<()> {
+        let (ack_tx, ack_rx) = channel();
+        tx.send((input, ack_tx)).expect("the publisher is alive");
+        ack_rx
+    }
+
     /// Joins the thread once it finishes, panicking when it outlives the
     /// timeout instead of hanging the test run.
     fn join_within(handle: std::thread::JoinHandle<()>, timeout: Duration) {
@@ -166,15 +173,13 @@ mod tests {
     }
 
     #[test]
-    fn test_publisher_retries_then_publishes_once() {
+    fn test_publisher_retries_then_publishes_once_and_confirms() {
         let (sink, state) = RecordingSink::new(3);
         let (tx, rx) = channel();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let handle =
-            spawn_publisher(rx, Box::new(sink), Arc::clone(&shutdown)).expect("the thread spawns");
+        let handle = spawn_publisher(rx, Box::new(sink)).expect("the thread spawns");
 
         let input = result(11);
-        tx.send(input.clone()).expect("the publisher is alive");
+        let confirm = send(&tx, input.clone());
         drop(tx);
         join_within(handle, Duration::from_secs(10));
 
@@ -184,18 +189,18 @@ mod tests {
         let published: SettlementResult =
             rmp_serde::from_slice(&state.published[0]).expect("the payload decodes");
         assert_eq!(published, input);
+        // The confirm fires after the write succeeds.
+        assert_eq!(confirm.recv(), Ok(()), "the write is confirmed");
     }
 
     #[test]
     fn test_publisher_publishes_every_result_in_order() {
         let (sink, state) = RecordingSink::new(0);
         let (tx, rx) = channel();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let handle =
-            spawn_publisher(rx, Box::new(sink), Arc::clone(&shutdown)).expect("the thread spawns");
+        let handle = spawn_publisher(rx, Box::new(sink)).expect("the thread spawns");
 
-        tx.send(result(1)).expect("the publisher is alive");
-        tx.send(result(2)).expect("the publisher is alive");
+        let _confirm1 = send(&tx, result(1));
+        let _confirm2 = send(&tx, result(2));
         drop(tx);
         join_within(handle, Duration::from_secs(10));
 
@@ -209,31 +214,33 @@ mod tests {
     }
 
     #[test]
-    fn test_publisher_shutdown_during_retry_exits_without_publishing() {
-        // The sink never accepts: the thread sits in the retry loop until the
-        // shutdown flag is raised, and the result is left to the journal
-        // replay of the next start.
+    fn test_publisher_retries_forever_against_a_dead_sink() {
+        // The sink never accepts: the thread sits in the retry loop and the
+        // submitter (the test) never receives the confirm — the durable
+        // choice: the frame stays unacked until the storage recovers.
         let (sink, state) = RecordingSink::new(usize::MAX);
         let (tx, rx) = channel();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let handle =
-            spawn_publisher(rx, Box::new(sink), Arc::clone(&shutdown)).expect("the thread spawns");
+        let handle = spawn_publisher(rx, Box::new(sink)).expect("the thread spawns");
 
-        tx.send(result(3)).expect("the publisher is alive");
+        let confirm = send(&tx, result(3));
         wait_until(|| state.lock().expect("the sink mutex").attempts >= 1, Duration::from_secs(5));
-        shutdown.store(true, Ordering::Relaxed);
-        join_within(handle, Duration::from_secs(5));
+        assert_eq!(
+            confirm.recv_timeout(Duration::from_millis(200)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        );
 
-        assert!(state.lock().expect("the sink mutex").published.is_empty());
+        // Dropping the channel leaves the retry loop to its own devices —
+        // the thread is detached in production (a SIGKILL is at-least-once
+        // safe); the test just drops the handle without joining.
+        drop(tx);
+        drop(handle);
     }
 
     #[test]
     fn test_publisher_exits_when_the_channel_drops() {
         let (sink, state) = RecordingSink::new(0);
         let (tx, rx) = channel();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let handle =
-            spawn_publisher(rx, Box::new(sink), Arc::clone(&shutdown)).expect("the thread spawns");
+        let handle = spawn_publisher(rx, Box::new(sink)).expect("the thread spawns");
 
         drop(tx);
         join_within(handle, Duration::from_secs(5));

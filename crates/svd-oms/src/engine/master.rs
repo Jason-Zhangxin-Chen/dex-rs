@@ -17,7 +17,7 @@ use super::{EngineError, connect_jetstream};
 use crate::config::OmsConfig;
 use async_nats::jetstream;
 use cache::object_pool::Cache;
-use ipc::mmap_spsc::SpscQueue;
+use ipc::mmap_spsc_fixed::SpscQueue;
 use primitives::message::hot_path::{OrderMsg, PipelineMsg, Trade};
 use primitives::order::Order;
 use primitives::orderbook::book::OrderBook;
@@ -92,10 +92,11 @@ fn batch_buffer_pool(batch_size: usize) -> Cache<Vec<PipelineMsg>> {
     })
 }
 
-/// The core spin loop: pops a batch of requests and executes them. The
-/// batch buffer is checked out of the pre-allocated pool and returned to it
-/// when the loop stops; the empty loop only spins, so the hot path performs
-/// no allocations and no blocking calls.
+/// The core spin loop: peeks a batch of requests, executes them and acks
+/// each one after it was processed. The batch buffer is checked out of the
+/// pre-allocated pool and returned to it when the loop stops; the empty
+/// loop only spins, so the hot path performs no allocations and no blocking
+/// calls.
 fn spin(
     mut book: OrderBook,
     mut ingress: SpscQueue<PipelineMsg>,
@@ -109,7 +110,10 @@ fn spin(
         if shutdown.load(Ordering::Relaxed) {
             break;
         }
-        let n = ingress.pop_batch(&mut batch);
+        // The peek does not advance the read index: each message is acked
+        // only after it was fully executed, so a crash mid-batch re-plays
+        // the unacked messages from the file-mapped queue on the next start.
+        let n = ingress.peek_batch(&mut batch);
         for msg in &batch[..n] {
             match msg {
                 PipelineMsg::User(request) => {
@@ -119,6 +123,7 @@ fn spin(
                     book.restore_order(order, *quantity)
                 }
             }
+            ingress.ack(1);
         }
         if n == 0 {
             std::hint::spin_loop();

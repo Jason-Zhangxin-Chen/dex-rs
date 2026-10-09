@@ -306,6 +306,14 @@ fn fabricated_hash(counter: u64) -> Hash32 {
     Hash32(bytes)
 }
 
+/// Fabricates the `counter`-th transaction of a scenario script: the hash
+/// of [`fabricated_hash`] with the nonce `counter - 1`. A deterministic
+/// [`SubmittedTx`] for multi-step scripts (the unscripted fallbacks consume
+/// the mock's own counter, so the scripts must not collide with it).
+pub fn tx_of(counter: u64) -> SubmittedTx {
+    SubmittedTx { tx_hash: fabricated_hash(counter), nonce: counter.saturating_sub(1) }
+}
+
 impl ChainClient for MockChain {
     fn submit(&self, calldata: &[u8]) -> Result<SubmittedTx, ChainError> {
         let mut inner = self.lock();

@@ -1,108 +1,89 @@
-# The configuration of the settlement service of the ETHUSDC market.
-#
-# The service drains the Trade events of the SVD_OMS_Master from the [trade]
-# share memory SPSC queue, journals them, batches them into on-chain
-# settleBatch calls and publishes the settlement results to the Redis
-# cluster. The queue file is owned by THIS process (create = true) — the
-# OMS attaches to it with create = false.
-
-# The symbol of the market this settlement serves.
+# The settlement service of one symbol. The config loads on start and is
+# reloadable via SIGHUP — every running thread snapshots its parameters at
+# launch, so the submitter pool, the queues and the chain parameters take
+# effect on the next restart.
 symbol = "0x0000000000000000000000000000000000000000000000000000000000000000"
-# The core the hot-path thread pins to; unset keeps the thread unpinned.
 # core_id = 0
-# The drain batch size of the core loop.
 batch_size = 1024
-# The cadence of the pending transaction polls.
 poll_interval_ms = 1000
-# The grace before a submitted-but-unseen transaction is re-submitted.
 tx_lost_grace_ms = 60000
 
-# The trade SPSC queue wired from the SVD_OMS_Master.
+# The trade SPSC queue wired from the SVD_OMS_Master. This process owns the
+# queue file: it creates it, the OMS attaches to it.
 [trade]
 path = "/dev/shm/svd_stl_ethusdc.trade"
 capacity = 65536
-# This process initializes the queue file on open.
 create = true
 
-# The batch assembly: one settleBatch call carries at most
-# max_trades_per_batch trades; a partial batch is flushed after
-# batch_window_ms.
-[batch]
-max_trades_per_batch = 64
-batch_window_ms = 500
+# The persistent batch-sequence counter (page-cache durable, create-if-missing).
+[core]
+seq_path = "/var/lib/svd-settlement/svd_stl_ethusdc.seq"
 
-# The retry policy of the submitter: a transient failure (a paused
-# protocol, a down chain) retries with an exponential backoff capped at
-# max_ms; after fee_bump_after tx-level failures the submission is replaced
-# with a fee-bumped transaction on the same nonce.
 [retry]
 base_ms = 1000
 max_ms = 60000
 jitter_pct = 20
 fee_bump_after = 3
 
-# The hand-off buffer pool of the core loop: the drained trades travel to
-# the submitter in buffers checked out of this pool.
-[handoff]
-pool_size = 8
-capacity = 1024
+# The shared chain facts: the protocol-level parameters.
+[chain]
+chain_id = 31337
+settlement_contract = "0x9fe46736679d2d9a65f0992f2272de9f3c7fa6e0"
+confirmations = 1
 
-# The local journal: the trade log, the batch states and the published
-# results. The durability boundary of the service.
-[journal]
-path = "/var/lib/svd-settlement/svd_stl_ethusdc.journal"
-size = 67108864
-
-# The Redis cluster the SettlementResult messages publish to (the channel
-# svd:stl:{symbol}:settlements is derived from the symbol).
 [redis]
 urls = ["redis://127.0.0.1:6379"]
 pool_size = 4
 
-# The SQL cluster the settled trades and the settlement rows write to.
 [sql]
 urls = ["mysql://svd:svd@127.0.0.1:3306/svd_settlement"]
 pool_size = 4
 
-# The chain interop.
-[chain]
-# The chain id, verified against the RPC nodes at startup.
-chain_id = 31337
-# The settlement contract (the EIP-712 verifying contract).
-settlement_contract = "0x9fe46736679d2d9a65f0992f2272de9f3c7fa6e0"
-# The confirmation depth of a settled transaction.
-confirmations = 1
-# The operator keystore (Web3 Secret Storage v3). The password comes from
-# the SVD_SETTLEMENT_KEYSTORE_PASSWORD environment variable, never from
-# this file, never in a log.
-keystore_path = "/var/lib/svd-settlement/operator.keystore"
-# The budget of one submission acknowledgement, in milliseconds.
+# The submitter pool: one submitter per operator key. Every submitter holds
+# its own nonce manager, gas strategy, RPC node pool and confirmation watch,
+# and consumes one batch at a time from its own batch queue. The password
+# comes from the SVD_SETTLEMENT_KEYSTORE_PASSWORD environment variable (one
+# variable for every keystore — never from this file, never in a log). Two
+# submitters must never share one keystore.
+
+[[submitters]]
+keystore_path = "/var/lib/svd-settlement/operator-a.keystore"
 submit_timeout_ms = 30000
 
-# One primary node and the secondaries in the failover order.
-[chain.rpc_pool.primary]
-name = "primary"
+# The submitter's own batch queue. The settlement process owns both ends:
+# it initializes the file when missing and never reinitializes on a restart
+# (the unprocessed frames survive).
+[submitters.queue]
+path = "/dev/shm/svd_stl_ethusdc.submit.0"
+capacity_bytes = 8388608
+
+[submitters.rpc_pool.primary]
+name = "primary-a"
 url = "http://10.0.0.10:8545"
 connect_timeout_ms = 2000
 rpc_timeout_ms = 5000
 stall_timeout_ms = 10000
 
-[[chain.rpc_pool.secondaries]]
+[[submitters.rpc_pool.secondaries]]
 name = "secondary-a"
 url = "http://10.0.0.11:8545"
-connect_timeout_ms = 2000
-rpc_timeout_ms = 5000
-stall_timeout_ms = 10000
 
-# The gas strategy of the submissions.
-[chain.gas]
-# The hard cap of the priority fee, in gwei.
+[submitters.gas]
 max_priority_fee_gwei = 2
-# The per-retry replacement increment, in percent.
 bump_pct = 15
-# The headroom over the current base fee, in basis points.
 base_fee_tolerance_bps = 20
-# The absolute ceiling of the gas limit.
 gas_limit_cap = 30000000
-# The headroom over the gas estimate, in percent.
 gas_buffer_pct = 10
+
+[[submitters]]
+keystore_path = "/var/lib/svd-settlement/operator-b.keystore"
+
+[submitters.queue]
+path = "/dev/shm/svd_stl_ethusdc.submit.1"
+capacity_bytes = 8388608
+
+[submitters.rpc_pool.primary]
+name = "primary-b"
+url = "http://10.0.0.20:8545"
+
+[submitters.gas]

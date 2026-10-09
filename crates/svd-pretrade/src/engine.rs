@@ -20,7 +20,7 @@ use crate::gateway::Gateway;
 use crate::margin::MarginCache;
 use crate::naming;
 use crossbeam_queue::ArrayQueue;
-use ipc::mmap_spsc::SpscQueue;
+use ipc::mmap_spsc_fixed::SpscQueue;
 use primitives::message::hot_path::{CancelOrder, OrderMsg, PipelineMsg};
 use storage::RedisKeyStore;
 use tracing::{error, info, warn};

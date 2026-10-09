@@ -1,9 +1,9 @@
 //! The configuration of the settlement service.
 //!
 //! The config is loaded from a TOML file and can be reloaded at runtime via
-//! SIGHUP. The symbol, the core id, the queue capacities, the journal and
-//! the chain parameters take effect on the next restart; the batching and
-//! retry parameters follow a reload (the submitter reads them per batch).
+//! SIGHUP. The reload swaps the active config, but every running thread
+//! snapshots its parameters at launch: the symbol, the queues, the submitter
+//! pool and the chain parameters take effect on the next restart.
 
 use std::path::Path;
 
@@ -14,10 +14,6 @@ use storage::RedisConfig;
 
 /// Default batch size of the core drain loop.
 const DEFAULT_BATCH_SIZE: usize = 1024;
-/// Default bound of one settlement batch.
-const DEFAULT_MAX_TRADES_PER_BATCH: usize = 64;
-/// Default flush window of a partial settlement batch, in milliseconds.
-const DEFAULT_BATCH_WINDOW_MS: u64 = 500;
 /// Default base of the retry backoff, in milliseconds.
 const DEFAULT_RETRY_BASE_MS: u64 = 1_000;
 /// Default cap of the retry backoff, in milliseconds.
@@ -31,14 +27,6 @@ const DEFAULT_POLL_INTERVAL_MS: u64 = 1_000;
 /// Default grace before a `Submitting` transaction never seen by the chain
 /// is re-submitted, in milliseconds.
 const DEFAULT_TX_LOST_GRACE_MS: u64 = 60_000;
-/// Default size of the hand-off buffer pool.
-const DEFAULT_HANDOFF_POOL_SIZE: usize = 8;
-/// Default capacity of one hand-off buffer.
-const DEFAULT_HANDOFF_CAPACITY: usize = 1024;
-/// Default journal file.
-const DEFAULT_JOURNAL_PATH: &str = "svd-settlement.journal";
-/// Default journal size: 64 MiB.
-const DEFAULT_JOURNAL_SIZE: u64 = 64 * 1024 * 1024;
 /// Default confirmation depth of a settled transaction.
 const DEFAULT_CONFIRMATIONS: u64 = 1;
 /// Default budget of one submission acknowledgement, in milliseconds.
@@ -109,16 +97,18 @@ pub struct SettlementConfig {
     /// The core the hot-path thread pins to.
     #[serde(default)]
     pub core_id: Option<usize>,
-    /// The drain batch size of the core loop.
+    /// The expected bound of one batch (the crosses of one taker order),
+    /// used by the startup check of the submitter queue capacities: every
+    /// submitter queue must hold a frame of this many trades. A larger
+    /// group is caught at runtime (the core stops with the trades unacked).
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
     /// The trade SPSC queue wired from the [SVD_OMS_Master]. This process
     /// owns the queue file: it creates it, the OMS attaches to it.
     pub trade: SpScConfig,
-    /// The batch assembly parameters.
-    #[serde(default)]
-    pub batch: BatchConfig,
-    /// The retry and monitoring policy of the submitter.
+    /// The persistent batch-sequence counter of the core thread.
+    pub core: CoreConfig,
+    /// The retry and monitoring policy of the submitters.
     #[serde(default)]
     pub retry: RetryConfig,
     /// The cadence of the pending transaction polls, in milliseconds.
@@ -128,21 +118,17 @@ pub struct SettlementConfig {
     /// in milliseconds.
     #[serde(default = "default_tx_lost_grace_ms")]
     pub tx_lost_grace_ms: u64,
-    /// The hand-off buffer pool of the core loop.
-    #[serde(default)]
-    pub handoff: HandoffConfig,
-    /// The local journal of the trades, the batch states and the results.
-    #[serde(default)]
-    pub journal: JournalConfig,
     /// The Redis cluster the results publish to.
     #[serde(default)]
     pub redis: RedisConfig,
     /// The SQL cluster the settled trades write to.
     #[serde(default)]
     pub sql: SqlConfig,
-    /// The chain interop: the RPC pool, the gas strategy and the operator
-    /// keystore.
-    pub chain: ChainConfig,
+    /// The shared chain facts: the protocol-level parameters.
+    pub chain: SharedChainConfig,
+    /// The submitter pool: one submitter per operator key, each with its
+    /// own batch queue and chain resources.
+    pub submitters: Vec<SubmitterConfig>,
 }
 
 impl SettlementConfig {
@@ -171,28 +157,16 @@ pub struct SpScConfig {
     pub create: bool,
 }
 
-/// The batch assembly parameters.
+/// The persistent batch-sequence counter of the core thread: a 4 KiB
+/// memory-mapped file, created when missing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct BatchConfig {
-    /// The bound of one `settleBatch` call.
-    #[serde(default = "default_max_trades_per_batch")]
-    pub max_trades_per_batch: usize,
-    /// The flush window of a partial batch, in milliseconds.
-    #[serde(default = "default_batch_window_ms")]
-    pub batch_window_ms: u64,
+pub struct CoreConfig {
+    /// The file path of the sequence counter.
+    pub seq_path: String,
 }
 
-impl Default for BatchConfig {
-    fn default() -> Self {
-        Self {
-            max_trades_per_batch: DEFAULT_MAX_TRADES_PER_BATCH,
-            batch_window_ms: DEFAULT_BATCH_WINDOW_MS,
-        }
-    }
-}
-
-/// The retry policy of the submitter.
+/// The retry policy of a submitter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetryConfig {
@@ -221,42 +195,6 @@ impl Default for RetryConfig {
     }
 }
 
-/// The hand-off buffer pool of the core loop.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HandoffConfig {
-    /// The number of the pooled buffers.
-    #[serde(default = "default_handoff_pool_size")]
-    pub pool_size: usize,
-    /// The capacity of one buffer.
-    #[serde(default = "default_handoff_capacity")]
-    pub capacity: usize,
-}
-
-impl Default for HandoffConfig {
-    fn default() -> Self {
-        Self { pool_size: DEFAULT_HANDOFF_POOL_SIZE, capacity: DEFAULT_HANDOFF_CAPACITY }
-    }
-}
-
-/// The local journal.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct JournalConfig {
-    /// The file path of the journal.
-    #[serde(default = "default_journal_path")]
-    pub path: String,
-    /// The total size of the journal file, in bytes.
-    #[serde(default = "default_journal_size")]
-    pub size: u64,
-}
-
-impl Default for JournalConfig {
-    fn default() -> Self {
-        Self { path: DEFAULT_JOURNAL_PATH.to_string(), size: DEFAULT_JOURNAL_SIZE }
-    }
-}
-
 /// The SQL cluster.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -269,7 +207,24 @@ pub struct SqlConfig {
     pub pool_size: u32,
 }
 
-/// The chain interop.
+/// The shared chain facts of the settlement service: the protocol-level
+/// parameters every submitter shares.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SharedChainConfig {
+    /// The chain id, verified against the RPC nodes at startup.
+    pub chain_id: u64,
+    /// The settlement contract address (the verifying contract of the
+    /// EIP-712 domain).
+    #[serde(with = "address_serde")]
+    pub settlement_contract: Address,
+    /// The confirmation depth of a settled transaction.
+    #[serde(default = "default_confirmations")]
+    pub confirmations: u64,
+}
+
+/// The chain interop of one submitter: the full parameter set the chain
+/// client consumes (see [`SubmitterConfig::chain_config`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChainConfig {
@@ -348,20 +303,80 @@ pub struct GasConfig {
     pub gas_buffer_pct: u16,
 }
 
+impl Default for GasConfig {
+    fn default() -> Self {
+        Self {
+            max_priority_fee_gwei: DEFAULT_MAX_PRIORITY_FEE_GWEI,
+            bump_pct: DEFAULT_BUMP_PCT,
+            base_fee_tolerance_bps: DEFAULT_BASE_FEE_TOLERANCE_BPS,
+            gas_limit_cap: DEFAULT_GAS_LIMIT_CAP,
+            gas_buffer_pct: DEFAULT_GAS_BUFFER_PCT,
+        }
+    }
+}
+
+/// The batch queue of one submitter: a file-mapped byte SPSC queue owned by
+/// this process (it initializes the file when missing and never
+/// reinitializes on a restart, so the unprocessed frames survive).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ByteQueueConfig {
+    /// The file path of the queue.
+    pub path: String,
+    /// The capacity of the data region, in bytes (at least 16).
+    pub capacity_bytes: usize,
+}
+
+/// One submitter of the pool: its operator key and its private chain
+/// resources. The submitter holds its own nonce manager, gas strategy, RPC
+/// node pool and confirmation watch, and consumes one batch at a time from
+/// its own queue.
+///
+/// Two submitters must never share one keystore: each would run its own
+/// nonce manager for the same operator account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubmitterConfig {
+    /// The path of the operator keystore file (Web3 Secret Storage v3).
+    /// The password comes from the `SVD_SETTLEMENT_KEYSTORE_PASSWORD`
+    /// environment variable — one variable for every keystore, never from
+    /// the config, never in a log.
+    pub keystore_path: String,
+    /// The budget of one submission acknowledgement, in milliseconds.
+    #[serde(default = "default_submit_timeout_ms")]
+    pub submit_timeout_ms: u64,
+    /// The submitter's own batch queue.
+    pub queue: ByteQueueConfig,
+    /// The submitter's RPC node pool: one primary and the secondaries in
+    /// the failover order.
+    pub rpc_pool: RpcPoolConfig,
+    /// The submitter's gas strategy.
+    #[serde(default)]
+    pub gas: GasConfig,
+}
+
+impl SubmitterConfig {
+    /// Merges the shared chain facts with this submitter's resources into
+    /// the full [`ChainConfig`] the chain client consumes.
+    pub fn chain_config(&self, shared: &SharedChainConfig) -> ChainConfig {
+        ChainConfig {
+            chain_id: shared.chain_id,
+            settlement_contract: shared.settlement_contract,
+            confirmations: shared.confirmations,
+            keystore_path: self.keystore_path.clone(),
+            submit_timeout_ms: self.submit_timeout_ms,
+            rpc_pool: self.rpc_pool.clone(),
+            gas: self.gas,
+        }
+    }
+}
+
 fn default_true() -> bool {
     true
 }
 
 fn default_batch_size() -> usize {
     DEFAULT_BATCH_SIZE
-}
-
-fn default_max_trades_per_batch() -> usize {
-    DEFAULT_MAX_TRADES_PER_BATCH
-}
-
-fn default_batch_window_ms() -> u64 {
-    DEFAULT_BATCH_WINDOW_MS
 }
 
 fn default_retry_base_ms() -> u64 {
@@ -386,22 +401,6 @@ fn default_poll_interval_ms() -> u64 {
 
 fn default_tx_lost_grace_ms() -> u64 {
     DEFAULT_TX_LOST_GRACE_MS
-}
-
-fn default_handoff_pool_size() -> usize {
-    DEFAULT_HANDOFF_POOL_SIZE
-}
-
-fn default_handoff_capacity() -> usize {
-    DEFAULT_HANDOFF_CAPACITY
-}
-
-fn default_journal_path() -> String {
-    DEFAULT_JOURNAL_PATH.to_string()
-}
-
-fn default_journal_size() -> u64 {
-    DEFAULT_JOURNAL_SIZE
 }
 
 fn default_sql_pool_size() -> u32 {
@@ -555,6 +554,7 @@ mod tests {
         assert_eq!(config.symbol, Symbol([0; 32]));
         assert_eq!(config.batch_size, 1024);
         assert_eq!(config.chain.chain_id, 31_337);
+        assert_eq!(config.submitters.len(), 2);
     }
 
     #[test]
@@ -564,24 +564,63 @@ mod tests {
             [trade]
             path = "/dev/shm/svd_stl_ethusdc.trade"
             capacity = 65536
+            [core]
+            seq_path = "/var/lib/svd-settlement/svd_stl_ethusdc.seq"
             [chain]
             chain_id = 31337
             settlement_contract = "0x9fe46736679d2d9a65f0992f2272de9f3c7fa6e0"
+            [[submitters]]
             keystore_path = "/var/lib/svd-settlement/operator.keystore"
-            [chain.rpc_pool.primary]
+            [submitters.queue]
+            path = "/dev/shm/svd_stl_ethusdc.submit.0"
+            capacity_bytes = 8388608
+            [submitters.rpc_pool.primary]
             name = "primary"
             url = "http://10.0.0.10:8545"
-            [chain.gas]
+            [submitters.gas]
         "#;
         let config = SettlementConfig::from_toml(text).expect("the minimal config parses");
         assert_eq!(config.batch_size, DEFAULT_BATCH_SIZE);
-        assert_eq!(config.batch.max_trades_per_batch, DEFAULT_MAX_TRADES_PER_BATCH);
         assert_eq!(config.retry.base_ms, DEFAULT_RETRY_BASE_MS);
         assert_eq!(config.chain.confirmations, DEFAULT_CONFIRMATIONS);
-        assert_eq!(config.chain.gas.max_priority_fee_gwei, DEFAULT_MAX_PRIORITY_FEE_GWEI);
-        assert_eq!(config.chain.rpc_pool.secondaries, Vec::new());
+        let submitter = &config.submitters[0];
+        assert_eq!(submitter.submit_timeout_ms, DEFAULT_SUBMIT_TIMEOUT_MS);
+        assert_eq!(submitter.gas, GasConfig::default());
+        assert_eq!(submitter.rpc_pool.secondaries, Vec::new());
         assert_eq!(config.redis.urls, storage::RedisConfig::default().urls);
         assert_eq!(config.sql.urls, Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_chain_config_merges_the_shared_facts_with_the_submitter() {
+        let text = r#"
+            symbol = "ETHUSDC"
+            [trade]
+            path = "/dev/shm/x"
+            capacity = 2
+            [core]
+            seq_path = "/tmp/x.seq"
+            [chain]
+            chain_id = 5
+            settlement_contract = "0x9fe46736679d2d9a65f0992f2272de9f3c7fa6e0"
+            confirmations = 3
+            [[submitters]]
+            keystore_path = "/k"
+            [submitters.queue]
+            path = "/dev/shm/q"
+            capacity_bytes = 4096
+            [submitters.rpc_pool.primary]
+            name = "p"
+            url = "http://127.0.0.1:8545"
+        "#;
+        let config = SettlementConfig::from_toml(text).unwrap();
+        let chain = config.submitters[0].chain_config(&config.chain);
+        assert_eq!(chain.chain_id, 5);
+        assert_eq!(chain.confirmations, 3);
+        assert_eq!(chain.keystore_path, "/k");
+        assert_eq!(chain.submit_timeout_ms, DEFAULT_SUBMIT_TIMEOUT_MS);
+        assert_eq!(chain.gas, GasConfig::default());
+        assert_eq!(chain.rpc_pool, config.submitters[0].rpc_pool);
     }
 
     #[test]
@@ -592,16 +631,55 @@ mod tests {
             [trade]
             path = "/dev/shm/x"
             capacity = 2
+            [core]
+            seq_path = "/tmp/x.seq"
             [chain]
             chain_id = 1
             settlement_contract = "0x9fe46736679d2d9a65f0992f2272de9f3c7fa6e0"
+            [[submitters]]
             keystore_path = "/x"
-            [chain.rpc_pool.primary]
+            [submitters.queue]
+            path = "/dev/shm/q"
+            capacity_bytes = 4096
+            [submitters.rpc_pool.primary]
             name = "p"
             url = "http://127.0.0.1:8545"
-            [chain.gas]
         "#;
         assert!(matches!(SettlementConfig::from_toml(text), Err(ConfigError::Toml(_))));
+    }
+
+    #[test]
+    fn test_leftover_sections_of_the_old_design_are_rejected() {
+        // The batching, hand-off and journal sections no longer exist: a
+        // config carrying them fails instead of silently ignoring them.
+        for section in ["[batch]", "[handoff]", "[journal]"] {
+            let text = format!(
+                r#"
+                symbol = "ETHUSDC"
+                [trade]
+                path = "/dev/shm/x"
+                capacity = 2
+                [core]
+                seq_path = "/tmp/x.seq"
+                [chain]
+                chain_id = 1
+                settlement_contract = "0x9fe46736679d2d9a65f0992f2272de9f3c7fa6e0"
+                [[submitters]]
+                keystore_path = "/x"
+                [submitters.queue]
+                path = "/dev/shm/q"
+                capacity_bytes = 4096
+                [submitters.rpc_pool.primary]
+                name = "p"
+                url = "http://127.0.0.1:8545"
+                {section}
+            "#
+            );
+            assert!(
+                matches!(SettlementConfig::from_toml(&text), Err(ConfigError::Toml(_))),
+                "{section} must be rejected"
+            );
+        }
     }
 
     #[test]
@@ -609,6 +687,24 @@ mod tests {
         let config = SettlementConfig::from_toml(SAMPLE).unwrap();
         let text = toml::to_string(&config).unwrap();
         assert_eq!(SettlementConfig::from_toml(&text).unwrap(), config);
+    }
+
+    #[test]
+    fn test_an_empty_submitter_pool_parses_but_is_rejected_at_launch() {
+        let text = r#"
+            symbol = "ETHUSDC"
+            submitters = []
+            [trade]
+            path = "/dev/shm/x"
+            capacity = 2
+            [core]
+            seq_path = "/tmp/x.seq"
+            [chain]
+            chain_id = 1
+            settlement_contract = "0x9fe46736679d2d9a65f0992f2272de9f3c7fa6e0"
+        "#;
+        let config = SettlementConfig::from_toml(text).unwrap();
+        assert!(config.submitters.is_empty());
     }
 
     #[test]

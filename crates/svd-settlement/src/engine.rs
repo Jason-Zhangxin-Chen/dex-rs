@@ -1,39 +1,36 @@
 //! The settlement runtime: the shared state of the process (config,
-//! shutdown), the forwarding core thread and the side threads.
+//! shutdown), the batch-assembling core thread and the side threads (the
+//! submitter pool, the result publisher and the SQL writer).
 //!
-//! The core thread is pure data forwarding: it drains the trade SPSC queue
-//! wired from the [SVD_OMS_Master] in batches, journals each drained group
-//! (the durability boundary — a drained trade survives a crash) and hands
-//! the group to the submitter through a pooled buffer. No checks, no
-//! locks beyond the journal append, no blocking, no allocation in the
-//! steady state.
+//! The core thread groups the drained trades by taker order and pushes one
+//! frame per group into the submitter queues; each submitter drives its own
+//! queue against the chain with its own operator key. No journal: the
+//! durability lives in the file-mapped queues and the acks (see
+//! [`crate::core`] and [`crate::submitter`]).
 
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::mpsc;
 
-use cache::object_pool::{Cache, CacheGuard};
-use ipc::mmap_spsc::SpscQueue;
+use ipc::mmap_spsc_fixed::SpscQueue;
+use ipc::mmap_spsc_var::ByteSpscQueue;
 use primitives::message::hot_path::Trade;
 use primitives::message::settlement::SettlementResult;
-use primitives::order::Order;
-use primitives::value::{Price, Quantity};
 use storage::RedisStore;
-use tracing::{error, info};
+use tracing::info;
 
 use crate::chain::ChainClient;
-use crate::config::{ConfigError, SettlementConfig};
-use crate::journal::{
-    SettlementJournal, SettlementJournalError, encode_trade_batch, trade_batch_budget,
+use crate::config::{
+    ConfigError, SettlementConfig, SharedChainConfig, SubmitterConfig as ConfigSubmitter,
 };
+use crate::core::{frame_budget, spin};
 use crate::naming::{settlement_channel, snapshot_key};
 use crate::publisher::spawn_publisher;
+use crate::seq::SeqFile;
 use crate::sql::{MySqlSettlement, SettlementSql, SqlError, spawn_sql_writer};
-use crate::submitter::{SubmitChannels, SubmitterConfig, spawn as spawn_submitter};
-
-/// Number of empty spins before the core thread yields the CPU.
-const SPINS_PER_YIELD: u32 = 4096;
+use crate::submitter::{ChainBuilder, SubmitChannels, SubmitterConfig, spawn as spawn_submitter};
 
 /// Errors of the settlement engine.
 #[derive(Debug)]
@@ -42,8 +39,6 @@ pub enum EngineError {
     Io(std::io::Error),
     /// The config could not be loaded.
     Config(ConfigError),
-    /// The journal failed.
-    Journal(SettlementJournalError),
     /// A storage (Redis) operation failed.
     Storage(storage::StorageError),
     /// The SQL cluster failed.
@@ -61,7 +56,6 @@ impl std::fmt::Display for EngineError {
         match self {
             EngineError::Io(err) => write!(f, "engine io: {err}"),
             EngineError::Config(err) => write!(f, "engine config: {err}"),
-            EngineError::Journal(err) => write!(f, "engine journal: {err}"),
             EngineError::Storage(err) => write!(f, "engine storage: {err}"),
             EngineError::Sql(err) => write!(f, "engine sql: {err}"),
             EngineError::Chain(err) => write!(f, "engine chain: {err}"),
@@ -76,7 +70,6 @@ impl std::error::Error for EngineError {
         match self {
             EngineError::Io(err) => Some(err),
             EngineError::Config(err) => Some(err),
-            EngineError::Journal(err) => Some(err),
             EngineError::Storage(err) => Some(err),
             EngineError::Sql(err) => Some(err),
             EngineError::Chain(err) => Some(err),
@@ -95,12 +88,6 @@ impl From<std::io::Error> for EngineError {
 impl From<ConfigError> for EngineError {
     fn from(err: ConfigError) -> Self {
         EngineError::Config(err)
-    }
-}
-
-impl From<SettlementJournalError> for EngineError {
-    fn from(err: SettlementJournalError) -> Self {
-        EngineError::Journal(err)
     }
 }
 
@@ -143,30 +130,19 @@ impl Runtime {
         &self.shutdown
     }
 
-    /// Applies a reloaded config. The batching and retry parameters follow
-    /// the reload; the symbol, the queues, the journal and the chain
-    /// parameters take effect on the next restart.
+    /// Applies a reloaded config. The running threads snapshot their
+    /// parameters at launch: the symbol, the queues, the submitter pool and
+    /// the chain parameters take effect on the next restart.
     pub fn reload(&self, config: SettlementConfig) {
         *self.config.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = config;
     }
 
-    /// Launches the engine: opens the journal and the trade queue, spawns
-    /// the side threads, then runs the core loop until the shutdown.
+    /// Launches the engine: opens the queues and the sequence counter,
+    /// spawns the side threads and the submitter pool, then runs the core
+    /// loop until the shutdown.
     pub fn launch(&self) -> Result<(), EngineError> {
         let config = self.config.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
         info!(symbol = %config.symbol.hex(), "starting the settlement engine");
-
-        // The journal, with the startup check that one drain batch always
-        // fits one record (the record header rides on top of the payload).
-        let journal = SettlementJournal::open(&config.journal.path, config.journal.size)?;
-        let budget =
-            trade_batch_budget(config.batch_size) as u64 + storage::journal::RECORD_HEADER_SIZE;
-        if config.journal.size.saturating_sub(storage::journal::HEADER_SIZE) < budget {
-            return Err(EngineError::BadConfig(format!(
-                "the journal size {} cannot hold one {} trade batch record ({budget} bytes)",
-                config.journal.size, config.batch_size
-            )));
-        }
 
         // The trade SPSC queue wired from the SVD_OMS_Master: this process
         // owns the queue file.
@@ -176,85 +152,183 @@ impl Runtime {
             config.trade.create,
         )?;
 
-        // The hand-off: the drained groups travel to the submitter in
-        // pooled buffers.
-        let (handoff_tx, handoff_rx) = mpsc::channel::<CacheGuard<Vec<Trade>>>();
-        let handoff_capacity = config.handoff.capacity;
-        let handoff_pool =
-            Cache::new(config.handoff.pool_size, move || Vec::with_capacity(handoff_capacity));
+        // The persistent batch-sequence counter, shared by the core thread
+        // and the submitters.
+        let seq = Arc::new(SeqFile::open(&config.core.seq_path)?);
 
-        // The chain client of the submitter.
-        let chain = build_chain_client(&config)?;
+        // Startup invariants of the submitter pool.
+        if config.submitters.is_empty() {
+            return Err(EngineError::BadConfig("at least one submitter is required".to_string()));
+        }
+        let budget = frame_budget(config.batch_size);
+        for submitter in &config.submitters {
+            if submitter.queue.capacity_bytes < budget {
+                return Err(EngineError::BadConfig(format!(
+                    "the submitter queue capacity {} cannot hold one {}-trade batch frame ({} bytes)",
+                    submitter.queue.capacity_bytes, config.batch_size, budget
+                )));
+            }
+        }
+
+        // The submitter queues: this process owns both ends. It initializes
+        // each file when missing and never reinitializes on a restart — the
+        // unprocessed frames survive.
+        let mut core_queues = Vec::with_capacity(config.submitters.len());
+        for submitter in &config.submitters {
+            let create = !Path::new(&submitter.queue.path).exists();
+            core_queues.push(ByteSpscQueue::open(
+                &submitter.queue.path,
+                submitter.queue.capacity_bytes,
+                create,
+            )?);
+        }
 
         // The outcome channels and the side threads, before the first trade
         // arrives.
-        let (publisher_tx, publisher_rx) = mpsc::channel::<SettlementResult>();
+        let (publisher_tx, publisher_rx) = mpsc::channel::<(SettlementResult, mpsc::Sender<()>)>();
         let (sql_tx, sql_rx) = mpsc::channel::<SettlementResult>();
         let sink = Box::new(RedisStore::connect(
             &config.redis,
             settlement_channel(config.symbol),
             snapshot_key(config.symbol),
         )?);
-        spawn_publisher(publisher_rx, sink, Arc::clone(&self.shutdown))?;
+        spawn_publisher(publisher_rx, sink)?;
         let sql = build_sql_writer(&config)?;
-        spawn_sql_writer(sql_rx, sql, Arc::clone(&self.shutdown))?;
-        let symbol = config.symbol;
-        spawn_submitter(
-            handoff_rx,
-            journal.clone(),
-            chain,
-            symbol,
-            SubmitChannels { publisher: publisher_tx, sql: sql_tx },
-            SubmitterConfig {
-                max_trades_per_batch: config.batch.max_trades_per_batch,
-                batch_window_ms: config.batch.batch_window_ms,
-                poll_interval_ms: config.poll_interval_ms,
-                confirm_depth: config.chain.confirmations,
-                tx_lost_grace_ms: config.tx_lost_grace_ms,
-                retry: config.retry.clone(),
-            },
-            Arc::clone(&self.shutdown),
-        )?;
+        spawn_sql_writer(sql_rx, sql)?;
 
-        // The forwarding core thread, joined below.
+        // The submitter pool: one thread per operator key, each consuming
+        // its own queue.
+        let symbol = config.symbol;
+        let shared = config.chain.clone();
+        let submitters_alive = Arc::new(AtomicUsize::new(config.submitters.len()));
+        let mut submitter_handles = Vec::with_capacity(config.submitters.len());
+        for (index, submitter) in config.submitters.iter().enumerate() {
+            // The submitter's own consumer instance of its queue file.
+            let submitter_queue =
+                ByteSpscQueue::open(&submitter.queue.path, submitter.queue.capacity_bytes, false)?;
+            let build_chain = build_submitter_chain(submitter, &shared)?;
+            let handle = spawn_submitter(
+                submitter_queue,
+                build_chain,
+                Arc::clone(&seq),
+                symbol,
+                SubmitChannels { publisher: publisher_tx.clone(), sql: sql_tx.clone() },
+                SubmitterConfig {
+                    poll_interval_ms: config.poll_interval_ms,
+                    confirm_depth: shared.confirmations,
+                    tx_lost_grace_ms: config.tx_lost_grace_ms,
+                    retry: config.retry.clone(),
+                },
+                Arc::clone(&self.shutdown),
+                Arc::clone(&submitters_alive),
+            )
+            .map_err(|err| {
+                EngineError::Runtime(format!(
+                    "cannot spawn the submitter {index} of {}: {err}",
+                    symbol.hex()
+                ))
+            })?;
+            submitter_handles.push(handle);
+        }
+
+        // The core thread, joined below: it groups the trades and feeds the
+        // submitter queues. Its buffers are pre-allocated from the trade
+        // queue capacity — the hard bound of one taker group.
         let core_shutdown = Arc::clone(&self.shutdown);
         let core_id = config.core_id;
-        let batch_size = config.batch_size;
+        let trade_capacity = config.trade.capacity;
         let thread = std::thread::Builder::new()
             .name("stl-core".to_string())
             .spawn(move || {
                 util::pin::pin_current_thread(core_id);
-                spin(queue, journal, handoff_tx, handoff_pool, batch_size, core_shutdown);
+                spin(queue, core_queues, seq, trade_capacity, submitters_alive, core_shutdown);
             })
             .map_err(|err| EngineError::Runtime(format!("cannot spawn the core thread: {err}")))?;
         thread.join().map_err(|_| EngineError::Runtime("the core thread panicked".to_string()))?;
+
+        // The submitters finish their in-flight batches on the shutdown
+        // (never acking unfinished work) and exit.
+        for handle in submitter_handles {
+            let _ = handle.join();
+        }
+        // Dropping the channel senders stops the publisher and the SQL
+        // writer (they exit on the channel closure).
+        drop(publisher_tx);
+        drop(sql_tx);
         info!("the settlement engine stopped");
         Ok(())
     }
 }
 
-/// Builds the chain client of the submitter. Behind the `chain-alloy`
-/// feature this is the alloy stack; without it the engine cannot submit
-/// and refuses to start.
-fn build_chain_client(
-    config: &SettlementConfig,
-) -> Result<Arc<dyn ChainClient + Send + Sync>, EngineError> {
+/// Builds the chain client constructor of one submitter: the closure runs
+/// on the submitter thread, which builds its own current-thread tokio
+/// runtime (kept alive for the thread's lifetime) and the alloy client on
+/// it. Behind the `chain-alloy` feature this is the alloy stack; without it
+/// the engine cannot submit and refuses to start.
+fn build_submitter_chain(
+    submitter: &ConfigSubmitter,
+    shared: &SharedChainConfig,
+) -> Result<ChainBuilder, EngineError> {
     #[cfg(feature = "chain-alloy")]
     {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|err| EngineError::Runtime(err.to_string()))?;
-        let client = crate::chain::alloy_impl::AlloyChainClient::new(
-            &config.chain,
-            runtime.handle().clone(),
-        )?;
-        Ok(Arc::new(client))
+        let chain_config = submitter.chain_config(shared);
+        Ok(Box::new(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|err| crate::chain::ChainError::Config { detail: err.to_string() })?;
+            let client = crate::chain::alloy_impl::AlloyChainClient::new(
+                &chain_config,
+                runtime.handle().clone(),
+            )?;
+            // The runtime stays alive on the submitter thread for the
+            // client's lifetime.
+            Ok(Arc::new(OwnedClient { client, _runtime: runtime }))
+        }))
     }
     #[cfg(not(feature = "chain-alloy"))]
     {
-        let _ = config;
+        let _ = (submitter, shared);
         Err(EngineError::Runtime("the chain client requires the chain-alloy feature".to_string()))
+    }
+}
+
+/// A chain client that owns the tokio runtime its alloy client drives.
+#[cfg(feature = "chain-alloy")]
+struct OwnedClient {
+    /// The alloy client.
+    client: crate::chain::alloy_impl::AlloyChainClient,
+    /// The current-thread runtime of the submitter thread, kept alive for
+    /// the client's lifetime.
+    _runtime: tokio::runtime::Runtime,
+}
+
+#[cfg(feature = "chain-alloy")]
+impl ChainClient for OwnedClient {
+    fn submit(
+        &self,
+        calldata: &[u8],
+    ) -> Result<crate::chain::SubmittedTx, crate::chain::ChainError> {
+        self.client.submit(calldata)
+    }
+
+    fn tx_state(
+        &self,
+        tx: primitives::base::Hash32,
+    ) -> Result<crate::chain::TxState, crate::chain::ChainError> {
+        self.client.tx_state(tx)
+    }
+
+    fn bump_fee(
+        &self,
+        calldata: &[u8],
+        nonce: u64,
+    ) -> Result<crate::chain::SubmittedTx, crate::chain::ChainError> {
+        self.client.bump_fee(calldata, nonce)
+    }
+
+    fn is_retryable(&self, err: &crate::chain::ChainError) -> bool {
+        self.client.is_retryable(err)
     }
 }
 
@@ -266,210 +340,4 @@ fn build_sql_writer(config: &SettlementConfig) -> Result<Box<dyn SettlementSql>,
         .map_err(|err| EngineError::Runtime(err.to_string()))?;
     let sql = runtime.block_on(MySqlSettlement::connect(&config.sql.urls, config.sql.pool_size))?;
     Ok(Box::new(sql))
-}
-
-/// The forwarding core loop: drains the trade queue in batches, journals
-/// each drained group and hands it to the submitter. The drain buffer and
-/// the encode buffer are pre-allocated once and reused; the journal append
-/// is a memory copy into the mapped pages, so the loop performs no
-/// allocation and no blocking in the steady state.
-///
-/// The shutdown drains the queue: the trade queue is file mapped (unread
-/// trades survive), and a drained group is journaled before the exit is
-/// even considered — the exit condition only fires on an empty pop. A full
-/// journal degrades gracefully: the record is halved until it fits, and a
-/// single trade that cannot fit stops the loop with an error.
-fn spin(
-    mut queue: SpscQueue<Trade>,
-    journal: SettlementJournal,
-    handoff_tx: mpsc::Sender<CacheGuard<Vec<Trade>>>,
-    handoff_pool: Cache<Vec<Trade>>,
-    batch_size: usize,
-    shutdown: Arc<AtomicBool>,
-) {
-    let mut drain: Vec<Trade> = Vec::with_capacity(batch_size);
-    drain.resize_with(batch_size, dummy_trade);
-    let mut encode_buf: Vec<u8> = Vec::with_capacity(trade_batch_budget(batch_size));
-    let mut empty_spins = 0u32;
-    info!("the settlement core loop started");
-    loop {
-        let n = queue.pop_batch(&mut drain);
-        if n == 0 {
-            if shutdown.load(Ordering::Relaxed) {
-                break;
-            }
-            std::hint::spin_loop();
-            empty_spins += 1;
-            if empty_spins.is_multiple_of(SPINS_PER_YIELD) {
-                std::thread::yield_now();
-            }
-            continue;
-        }
-        // Journal first, hand off second — the durability boundary. A full
-        // journal stops the loop: the log never overwrites records, so no
-        // splitting makes room (two records always cost more than one) —
-        // the startup check sizes the journal for one drain batch and the
-        // log fills over the process lifetime until a compaction exists.
-        let mut start = 0usize;
-        while start < n {
-            if let Err(err) = encode_trade_batch(&drain[start..n], &mut encode_buf) {
-                error!(error = %err, "cannot encode the trade batch, stopping the core loop");
-                return;
-            }
-            if let Err(err) = journal.write_encoded(&encode_buf) {
-                error!(error = %err, "cannot journal the trade batch, stopping the core loop");
-                return;
-            }
-            let mut guard = handoff_pool.acquire();
-            guard.extend_from_slice(&drain[start..n]);
-            if handoff_tx.send(guard).is_err() {
-                error!("the submitter is gone, stopping the core loop");
-                return;
-            }
-            start = n;
-        }
-    }
-    info!("the settlement core loop stopped");
-}
-
-/// The filler of the drain buffer: `Trade` has no `Default`.
-fn dummy_trade() -> Trade {
-    Trade::new(Order::default(), Quantity::ZERO, Order::default(), Price::ZERO, Quantity::ZERO)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::AtomicUsize;
-
-    /// Monotonic counter so tests running in parallel never collide on
-    /// temp paths.
-    static SEQ: AtomicUsize = AtomicUsize::new(0);
-
-    /// Removes the file when dropped.
-    struct TempFile(std::path::PathBuf);
-
-    impl Drop for TempFile {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
-    fn temp_path(tag: &str) -> std::path::PathBuf {
-        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("dex_stl_engine_{}_{}_{}", std::process::id(), tag, seq))
-    }
-
-    fn trade(user: u8, nonce: u64) -> Trade {
-        use primitives::address::Address;
-        use primitives::base::{Hash32, Nonce, Side, Symbol};
-        use primitives::order::{OrderCold, OrderColdCommon, OrderHot, OrderKind};
-        use primitives::signature::Signature;
-        use primitives::time_in_force::TimeInForce;
-        use primitives::value::TimestampMs;
-        Trade::new(
-            Order::new(
-                OrderHot {
-                    user: Address([user; 20]),
-                    nonce: Nonce(nonce),
-                    price: Price(100),
-                    quantity: Quantity(10),
-                    time_in_force: TimeInForce::Gtc,
-                    side: Side::Buy,
-                },
-                OrderCold::new(
-                    OrderColdCommon::new(
-                        Hash32([0; 32]),
-                        Symbol([0; 32]),
-                        Signature::default(),
-                        TimestampMs(0),
-                    ),
-                    OrderKind::Standard,
-                ),
-            ),
-            Quantity(9),
-            Order::default(),
-            Price(100),
-            Quantity(1),
-        )
-    }
-
-    #[test]
-    fn test_spin_journals_and_hands_off_the_drained_trades() {
-        let queue_path = temp_path("queue");
-        let journal_path = temp_path("journal");
-        let _guards = (TempFile(queue_path.clone()), TempFile(journal_path.clone()));
-
-        let mut queue = SpscQueue::<Trade>::open(&queue_path, 64, true).unwrap();
-        queue.push_batch(&[trade(1, 1), trade(2, 1)]);
-        drop(queue);
-
-        let journal = SettlementJournal::open(&journal_path.to_string_lossy(), 4096).unwrap();
-        let (tx, rx) = mpsc::channel::<CacheGuard<Vec<Trade>>>();
-        let shutdown = Arc::new(AtomicBool::new(true)); // drain once, then exit
-        spin(
-            SpscQueue::open(&queue_path, 64, false).unwrap(),
-            journal.clone(),
-            tx,
-            Cache::new(2, || Vec::with_capacity(8)),
-            16,
-            shutdown,
-        );
-
-        // Both trades reached the hand-off channel.
-        let mut received = Vec::new();
-        for guard in rx.try_iter() {
-            received.extend_from_slice(&guard);
-        }
-        assert_eq!(received.len(), 2);
-
-        // And the journal holds them as a trade-batch record.
-        let records = journal.replay().unwrap();
-        assert_eq!(records.len(), 1);
-        let (_, record) = &records[0];
-        match record {
-            crate::journal::SettlementRecord::TradeBatch { trades } => {
-                assert_eq!(trades.len(), 2);
-            }
-            other => panic!("expected a trade batch record, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_spin_stops_when_the_journal_cannot_fit_the_batch() {
-        let queue_path = temp_path("queue_full");
-        let journal_path = temp_path("journal_full");
-        let _guards = (TempFile(queue_path.clone()), TempFile(journal_path.clone()));
-
-        // The journal holds a little over one one-trade record: a two-trade
-        // drain does not fit, the loop stops with nothing journaled and
-        // nothing handed off (the trades stay in the file-mapped queue —
-        // a restart with a grown journal re-drains them).
-        let mut queue = SpscQueue::<Trade>::open(&queue_path, 64, true).unwrap();
-        queue.push_batch(&[trade(1, 1), trade(2, 1)]);
-        drop(queue);
-
-        let mut one_trade = Vec::new();
-        encode_trade_batch(&[trade(1, 1)], &mut one_trade).unwrap();
-        let journal = SettlementJournal::open(
-            &journal_path.to_string_lossy(),
-            storage::journal::HEADER_SIZE
-                + storage::journal::RECORD_HEADER_SIZE
-                + one_trade.len() as u64
-                + 16,
-        )
-        .unwrap();
-        let (tx, rx) = mpsc::channel::<CacheGuard<Vec<Trade>>>();
-        spin(
-            SpscQueue::open(&queue_path, 64, false).unwrap(),
-            journal.clone(),
-            tx,
-            Cache::new(2, || Vec::with_capacity(8)),
-            16,
-            Arc::new(AtomicBool::new(true)),
-        );
-
-        assert!(journal.replay().unwrap().is_empty(), "nothing fits, nothing journals");
-        assert_eq!(rx.try_iter().count(), 0, "nothing is handed off either");
-    }
 }
