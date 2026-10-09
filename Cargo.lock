@@ -4720,6 +4720,7 @@ dependencies = [
  "hmac",
  "ipc",
  "k256",
+ "memmap2",
  "pbkdf2",
  "primitives",
  "rmp-serde",

@@ -210,8 +210,21 @@ impl<T: Copy> SpscQueue<T> {
     }
 
     /// Pop a batch of elements, the data elements are copied into the out buffer, the function
-    /// returns the number of elements are popped.
+    /// returns the number of elements are popped: a [`SpscQueue::peek_batch`] followed by the
+    /// ack of the peeked count.
     pub fn pop_batch(&mut self, out: &mut [T]) -> usize {
+        let n = self.peek_batch(out);
+        self.ack(n);
+        n
+    }
+
+    /// Peeks a batch of elements without advancing the read index, the data elements are copied
+    /// into the out buffer, the function returns the number of elements are peeked. Re-peeking
+    /// before the ack returns the same elements. The caller advances the read index explicitly
+    /// with [`SpscQueue::ack`] once the peeked elements are fully processed or delivered to the
+    /// next stage — the unacked elements stay in the queue and survive a crash of the consumer.
+    #[inline]
+    pub fn peek_batch(&self, out: &mut [T]) -> usize {
         if out.is_empty() {
             return 0;
         }
@@ -238,10 +251,28 @@ impl<T: Copy> SpscQueue<T> {
                 std::ptr::copy_nonoverlapping(base, out.as_mut_ptr().add(first), n - first);
             }
         }
+        n
+    }
+
+    /// Advances the read index by `n` elements, releasing them to the producer. The caller must
+    /// have peeked at least `n` committed elements with [`SpscQueue::peek_batch`]; advancing past
+    /// the producer's write index is a programming error.
+    #[inline]
+    pub fn ack(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+
+        let header = self.header();
+        // `write` belongs to the producer: Acquire publishes its data writes before the ack
+        // releases them. `read` is the consumer's own index, so Relaxed is enough.
+        let write = header.write_idx.value.load(Ordering::Acquire);
+        let read = header.read_idx.value.load(Ordering::Relaxed);
+        let avail = if write >= read { write - read } else { self.capacity - read + write };
+        assert!(n <= avail, "the ack of {n} exceeds the committed {avail} elements");
 
         let next = (read + n) % self.capacity;
         header.read_idx.value.store(next, Ordering::Release);
-        n
     }
 }
 
@@ -552,6 +583,103 @@ mod tests {
         assert_eq!(queue.push_batch(&[]), 0);
         let mut out: [u32; 0] = [];
         assert_eq!(queue.pop_batch(&mut out), 0);
+    }
+
+    #[test]
+    fn test_peek_batch_copies_without_advancing() {
+        let (mut queue, _guard) = open_queue::<u32>("peekstatic", 8);
+        assert_eq!(queue.push_batch(&[0, 1, 2]), 3);
+        let mut out = [0u32; 3];
+        assert_eq!(queue.peek_batch(&mut out), 3);
+        assert_eq!(out, [0, 1, 2]);
+        // The elements stay committed: re-peeking returns the same data and
+        // the producer sees no free space.
+        let mut again = [0u32; 3];
+        assert_eq!(queue.peek_batch(&mut again), 3);
+        assert_eq!(again, [0, 1, 2]);
+        assert_eq!(queue.available(), 4);
+    }
+
+    #[test]
+    fn test_ack_advances_and_repeek_returns_the_next_elements() {
+        let (mut queue, _guard) = open_queue::<u32>("ackadvance", 8);
+        assert_eq!(queue.push_batch(&[0, 1, 2, 3, 4]), 5);
+        let mut out = [0u32; 5];
+        assert_eq!(queue.peek_batch(&mut out), 5);
+        queue.ack(3);
+        assert_eq!(queue.available(), 5);
+        let mut rest = [0u32; 2];
+        assert_eq!(queue.peek_batch(&mut rest), 2);
+        assert_eq!(rest, [3, 4]);
+        queue.ack(2);
+        assert_eq!(queue.available(), 7);
+        assert_eq!(queue.peek_batch(&mut out), 0);
+    }
+
+    #[test]
+    fn test_pop_batch_equals_peek_then_ack() {
+        let (mut queue, _guard) = open_queue::<u32>("peekthenack", 8);
+        assert_eq!(queue.push_batch(&[0, 1, 2, 3, 4]), 5);
+
+        let mut popped = [0u32; 3];
+        assert_eq!(queue.pop_batch(&mut popped), 3);
+        assert_eq!(popped, [0, 1, 2]);
+
+        let mut peeked = [0u32; 2];
+        assert_eq!(queue.peek_batch(&mut peeked), 2);
+        assert_eq!(peeked, [3, 4]);
+        queue.ack(2);
+
+        let mut empty = [0u32; 1];
+        assert_eq!(queue.pop_batch(&mut empty), 0);
+        assert_eq!(queue.available(), 7);
+    }
+
+    #[test]
+    fn test_ack_zero_is_a_noop() {
+        let (mut queue, _guard) = open_queue::<u32>("ackzero", 8);
+        assert_eq!(queue.push_batch(&[0, 1]), 2);
+        queue.ack(0);
+        let mut out = [0u32; 2];
+        assert_eq!(queue.peek_batch(&mut out), 2);
+        assert_eq!(out, [0, 1]);
+    }
+
+    #[test]
+    fn test_peek_partial_buffer_then_ack_partial() {
+        let (mut queue, _guard) = open_queue::<u32>("peekpartial", 8);
+        assert_eq!(queue.push_batch(&[0, 1, 2, 3, 4]), 5);
+        let mut out = [0u32; 3];
+        assert_eq!(queue.peek_batch(&mut out), 3);
+        queue.ack(3);
+        let mut rest = [0u32; 3];
+        assert_eq!(queue.peek_batch(&mut rest), 2);
+        assert_eq!(rest[..2], [3, 4]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_ack_past_the_committed_elements_panics() {
+        let (mut queue, _guard) = open_queue::<u32>("ackpanic", 8);
+        assert_eq!(queue.push_batch(&[0, 1]), 2);
+        queue.ack(3);
+    }
+
+    #[test]
+    fn test_peek_batch_wraparound_without_ack() {
+        let (mut queue, _guard) = open_queue::<u32>("peekwrap", 8);
+        // Fill the ring to the end and pop one: the next read wraps.
+        assert_eq!(queue.push_batch(&[1, 2, 3, 4, 5, 6, 7]), 7);
+        let mut one = [0u32; 1];
+        assert_eq!(queue.pop_batch(&mut one), 1);
+        // Only the one freed slot is pushed: the committed elements
+        // straddle the wrap, and the peek copies them in order without
+        // advancing the read index.
+        assert_eq!(queue.push_batch(&[8, 9]), 1);
+        let mut all = [0u32; 8];
+        assert_eq!(queue.peek_batch(&mut all), 7);
+        assert_eq!(all[..7], [2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(queue.available(), 0);
     }
 
     #[test]

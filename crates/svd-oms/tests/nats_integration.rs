@@ -180,8 +180,10 @@ fn test_master_slave_replication_and_journal_recovery() {
     // without create (mirroring the production wiring).
     let master_config = config("master", &symbol, &dir, false);
     let slave_config = config("slave", &symbol, &dir, false);
-    ipc::mmap_spsc::SpscQueue::<OrderMsg>::open(&master_config.ingress.path, 16, true).unwrap();
-    ipc::mmap_spsc::SpscQueue::<OrderMsg>::open(&master_config.settlement.path, 16, true).unwrap();
+    ipc::mmap_spsc_fixed::SpscQueue::<OrderMsg>::open(&master_config.ingress.path, 16, true)
+        .unwrap();
+    ipc::mmap_spsc_fixed::SpscQueue::<OrderMsg>::open(&master_config.settlement.path, 16, true)
+        .unwrap();
 
     // Shared runtime handles, mirroring `Runtime` without its core thread.
     let mode = Arc::new(AtomicU8::new(MODE_SLAVE));
@@ -213,7 +215,7 @@ fn test_master_slave_replication_and_journal_recovery() {
         // loop needs a moment to open the queue; retry pushes until the
         // queue accepts them.
         let mut queue =
-            ipc::mmap_spsc::SpscQueue::<OrderMsg>::open(&ingress_path, 16, false).unwrap();
+            ipc::mmap_spsc_fixed::SpscQueue::<OrderMsg>::open(&ingress_path, 16, false).unwrap();
         let mut pending = steps.clone();
         let deadline = Instant::now() + Duration::from_secs(15);
         while !pending.is_empty() && Instant::now() < deadline {
