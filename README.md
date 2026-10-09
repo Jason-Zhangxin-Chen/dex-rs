@@ -167,3 +167,14 @@ cargo test --release -p primitives book_benchmark -- --ignored --nocapture
 ## License
 
 [Apache-2.0](LICENSE)
+
+## To the future of DEX
+The DEX primitives will become the 1st class citizen of the layer1 network protocols, this requires the layer1 blockchain
+refactoring with the execution layer, the state database and transaction primitives, for the last two years(2025 and 2026),
+a lots of performance innovation happens over the layer1, such as the 2 rounds pipelined consensus protocol(SimpleX),
+the N5F+1 BFT consensus models(Minimmit), the quick merkle database (QuickMerkleDB) in the state management layer, the
+Lattice Hash, the structured gossiping, eraser code based block propagation etc... All help the block finality come to
+ millisecond level, it is the time for the DEX primitives to be integrated into the layer1 blockchain, it would fix the
+ pain points of current hybrid DEX architectures, such as the delay between the CLOB execution layer and the settlement
+  layer, the view over the time, the transparency of the CLOB, the front running, etc... I am going to build it in another
+  repo soon.

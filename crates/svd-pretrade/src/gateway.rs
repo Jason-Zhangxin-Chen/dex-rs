@@ -61,6 +61,8 @@ pub struct Gateway {
     /// The feed liveness timestamp, updated by the margin feed.
     liveness: Arc<AtomicU64>,
     /// The shared pipeline queue.
+    // todo: implement the ArrayQueue with an underlying file-backed ring buffer to survive
+    // a crash and avoid losing accepted requests.
     queue: Arc<ArrayQueue<PipelineMsg>>,
     /// The keyed store of the on-demand margin pulls.
     key_store: RedisKeyStore,
