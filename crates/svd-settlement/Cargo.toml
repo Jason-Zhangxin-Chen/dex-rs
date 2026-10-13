@@ -38,7 +38,7 @@ zeroize = "1"
 
 # The SQL cluster writer. No compile-time query macros on purpose: the
 # queries are plain strings, so no DATABASE_URL is needed at build time.
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "mysql"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "mysql"] }
 
 # The chain interop: one meta crate with an explicit minimal feature set.
 alloy = { workspace = true, default-features = false, features = [
