@@ -2,10 +2,14 @@
 
 use std::fmt::Write;
 
+use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
 
 /// Address in EVM compatible protocols.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[repr(C)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, Pod, Zeroable,
+)]
 #[serde(transparent)]
 pub struct Address(pub [u8; 20]);
 

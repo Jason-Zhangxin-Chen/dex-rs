@@ -3,6 +3,7 @@
 
 use crate::order::Order;
 use crate::value::{Price, Quantity};
+use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
 
 /// Replication message contains the changes of the book triggered by an
@@ -123,7 +124,7 @@ impl OrderStatus {
 /// Each variant identifies the specific mechanism that triggered the
 /// cancellation, enabling upstream services to provide detailed
 /// notifications to clients.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Zeroable)]
 #[repr(u8)]
 pub enum CancelReason {
     /// Cancelled by explicit user request via `cancel_order`.
@@ -147,6 +148,11 @@ pub enum CancelReason {
     /// exhausted margin).
     SettlementFailed,
 }
+
+// SAFETY: the queue discipline of [`crate::message::hot_path`] guarantees a
+// shared memory slot is only ever read after the producer wrote a valid
+// `CancelReason` into it, so an invalid discriminant is never observed.
+unsafe impl Pod for CancelReason {}
 
 /// Closed taxonomy of reasons an order may be rejected at admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

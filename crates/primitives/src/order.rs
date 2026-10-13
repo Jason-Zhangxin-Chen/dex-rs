@@ -5,6 +5,7 @@ use crate::base::{Hash32, Nonce, PegReferenceType, Side, Symbol};
 use crate::signature::Signature;
 use crate::time_in_force::TimeInForce;
 use crate::value::{Price, Quantity, TimestampMs};
+use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 
@@ -20,7 +21,8 @@ pub const NIL: OrderIdx = u32::MAX;
 pub const DEFAULT_RESERVE_REPLENISH_AMOUNT: u64 = 1;
 
 /// Order represents the trade intent of the user.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Pod, Zeroable)]
 pub struct Order {
     /// Hot data for cache line friendly loading.
     pub hot: OrderHot,
@@ -128,8 +130,12 @@ impl From<Order> for OrderNode {
 
 /// OrderHot contains the core data for match engine, it is planed on purpose for cache line
 /// friendly loading, the tuple (Address, Nonce) is used to index an order in the book.
+///
+/// `Pod` is implemented manually: the struct is `#[repr(C)]` but its fields
+/// leave padding bytes (the `Address` ends at 20, the `Nonce` aligns at 24),
+/// which the derive rejects.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Zeroable)]
 pub struct OrderHot {
     /// (Address, Nonce) works as the key pointing to an order in the book.
     /// The user address.
@@ -150,9 +156,14 @@ pub struct OrderHot {
     pub side: Side, // 1 Bytes,
 }
 
+// SAFETY: `OrderHot` is `#[repr(C)]`; every field is `Pod` and the struct
+// contains no pointers, references or other process-specific addresses. The
+// padding bytes are initialized by the constructors writing the whole value.
+unsafe impl Pod for OrderHot {}
+
 /// OrderCold contains cold data of an order.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Pod, Zeroable)]
 pub struct OrderCold {
     /// Common cold data of an order.
     pub common: OrderColdCommon,
@@ -161,8 +172,11 @@ pub struct OrderCold {
 }
 
 /// Common code data for order.
+///
+/// `Pod` is implemented manually: the struct is `#[repr(C)]` but the 65-byte
+/// `Signature` field leaves 3 trailing padding bytes, which the derive rejects.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Zeroable)]
 pub struct OrderColdCommon {
     /// The hash of the order.
     id: Hash32,
@@ -176,6 +190,12 @@ pub struct OrderColdCommon {
     /// When the order is created.
     timestamp: TimestampMs,
 }
+
+// SAFETY: `OrderColdCommon` is `#[repr(C)]`; every field is `Pod` and the
+// struct contains no pointers, references or other process-specific
+// addresses. The trailing padding bytes are initialized by the constructors
+// writing the whole value.
+unsafe impl Pod for OrderColdCommon {}
 
 impl OrderColdCommon {
     /// Constructs the common cold data of an order.
@@ -208,8 +228,13 @@ impl OrderCold {
 
 /// OrderCold represents cold data of an order, it includes some common data and some type specific
 /// data fields.
+///
+/// `Pod` is implemented manually (the derive supports `#[repr(C)]` structs
+/// only) under the shared memory contract of [`crate::message::hot_path`]:
+/// a queue slot is only read after the producer wrote a valid `OrderKind`
+/// into it, so an invalid discriminant is never observed.
 #[repr(C, u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Zeroable)]
 pub enum OrderKind {
     /// Standard limit order.
     #[default]
@@ -265,6 +290,9 @@ pub enum OrderKind {
         auto_replenish: bool,
     },
 }
+
+// SAFETY: see the contract on the enum definition.
+unsafe impl Pod for OrderKind {}
 
 #[cfg(test)]
 mod tests {

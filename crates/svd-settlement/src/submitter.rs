@@ -692,16 +692,17 @@ mod tests {
         .unwrap()
     }
 
-    /// The frames still waiting in the queue at `path` (opened read-only).
+    /// The first frame still waiting in the queue, observed without consuming
+    /// it: only the submitter advances the read index, so the helper never
+    /// races with it. An empty result means the queue is empty — the
+    /// submitter consumed (and acked) everything.
     fn frames_left(path: &std::path::Path, capacity: usize) -> Vec<BatchFrame> {
-        let mut queue = ByteSpscQueue::open(path, capacity, false).unwrap();
+        let queue = ByteSpscQueue::open(path, capacity, false).unwrap();
         let mut buf = Vec::new();
-        let mut frames = Vec::new();
-        while let Ok(Some(len)) = queue.peek(&mut buf) {
-            frames.push(crate::core::decode_frame(&buf[..len]).unwrap());
-            queue.ack(FRAME_HEADER_SIZE + len).unwrap();
+        match queue.peek(&mut buf) {
+            Ok(Some(len)) => vec![crate::core::decode_frame(&buf[..len]).unwrap()],
+            Ok(None) | Err(_) => Vec::new(),
         }
-        frames
     }
 
     #[test]

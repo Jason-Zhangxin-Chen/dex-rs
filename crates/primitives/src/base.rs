@@ -2,10 +2,14 @@
 
 use std::fmt::Write;
 
+use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
 
 /// Symbol represents the symbol of a product.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[repr(C)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, Pod, Zeroable,
+)]
 #[serde(transparent)]
 pub struct Symbol(pub [u8; 32]);
 
@@ -21,8 +25,14 @@ impl Symbol {
 }
 
 /// Side represents the side of an order.
+///
+/// The manual `Pod` impl (the derive supports `#[repr(C)]` structs only) is
+/// sound in the shared memory use because every instance is constructed from
+/// a valid `Side` value: a queue slot is only read after the producer wrote a
+/// valid value into it, see the contract in
+/// [`crate::message::hot_path`].
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, Zeroable)]
 pub enum Side {
     /// Buy side (bids)
     #[default]
@@ -32,8 +42,16 @@ pub enum Side {
     Sell,
 }
 
+// SAFETY: the queue discipline of [`crate::message::hot_path`] guarantees a
+// shared memory slot is only ever read after the producer wrote a valid
+// `Side` into it, so an invalid discriminant is never observed.
+unsafe impl Pod for Side {}
+
 /// Hash32 represents 32 bytes hash.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Hash)]
+#[repr(C)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Hash, Pod, Zeroable,
+)]
 #[serde(transparent)]
 pub struct Hash32(pub [u8; 32]);
 
@@ -49,13 +67,16 @@ impl Hash32 {
 }
 
 /// Nonce represents a sequence number of user's order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[repr(C)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, Pod, Zeroable,
+)]
 #[serde(transparent)]
 pub struct Nonce(pub u64);
 
 /// Reference price type for pegged orders.
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Zeroable)]
 pub enum PegReferenceType {
     /// Pegged to best bid price.
     BestBid,
@@ -66,6 +87,11 @@ pub enum PegReferenceType {
     /// Pegged to last trade price.
     LastTrade,
 }
+
+// SAFETY: the queue discipline of [`crate::message::hot_path`] guarantees a
+// shared memory slot is only ever read after the producer wrote a valid
+// `PegReferenceType` into it, so an invalid discriminant is never observed.
+unsafe impl Pod for PegReferenceType {}
 
 /// Total quote-asset computed as `Σ price × quantity` across every transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
