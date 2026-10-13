@@ -1,9 +1,18 @@
 //! Defines the value types for the exchange system.
+//!
+//! The value types are plain old data: `#[repr(C)]` newtypes over integers so
+//! their in-memory layout is fixed and they implement [`bytemuck::Pod`] —
+//! the requirement for sharing them between processes through the share
+//! memory queues of the `ipc` crate.
 
+use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
 
 /// Value type representing a price.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[repr(C)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Pod, Zeroable,
+)]
 pub struct Price(pub u64);
 
 impl Price {
@@ -18,7 +27,8 @@ impl Default for Price {
 }
 
 /// Quantity type representing a quantity in an order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Pod, Zeroable)]
 pub struct Quantity(pub u64);
 
 impl Quantity {
@@ -33,7 +43,8 @@ impl Default for Quantity {
 }
 
 /// TimestampMS representing a TS in millisecond.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Pod, Zeroable)]
 pub struct TimestampMs(pub u64);
 
 impl TimestampMs {

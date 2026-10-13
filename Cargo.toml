@@ -12,6 +12,14 @@ slab = "0.4.12"
 rustc-hash = "2.1.3"
 litemap = "0.8.3"
 memmap2 = "0.9.11"
+# Plain-old-data bound of the shared memory queues: `Pod` proves the value has
+# no padding, no pointers/references and a fixed layout, so it can be mapped
+# into another process unchanged. The derive only covers `#[repr(C)]` structs;
+# the queue message enums implement it manually on their `#[repr(C, u8)]` /
+# `#[repr(u8)]` layouts.
+bytemuck = { version = "1.25.2", features = ["derive"] }
+# flock(2) of the queue's sidecar lock file, see crates/ipc/src/mmap_spsc_fixed.rs.
+libc = "0.2"
 redis = { version = "1.7", features = ["cluster", "tokio-comp"] }
 # The default features pull in the CDLA-licensed TLS/websockets stack; the
 # ring provider keeps the build free of aws-lc (no cmake requirement).

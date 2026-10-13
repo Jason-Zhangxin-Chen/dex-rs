@@ -1,19 +1,38 @@
 //! Defines messages transferring between the hot path components.
 //! All the message on the hotpath should be fixed sized for preallocation in share memory.
 //!
+//! # The shared memory `Pod` contract
+//!
+//! The messages travel through the share memory queues of the `ipc` crate as raw
+//! byte images (`SpscQueue<T>` requires `T: bytemuck::Pod`), so every message
+//! type here has a fixed `#[repr(C)]` / `#[repr(C, u8)]` layout and no pointers,
+//! references, `Vec`s, `String`s or anything else holding a process-specific
+//! address. Both processes of a queue must run the same binary — the queue
+//! header's magic and version fields reject files written by an older or
+//! foreign layout, see `crates/ipc/src/mmap_spsc_fixed.rs`.
+//!
+//! The data carrying enums implement `Pod` manually (bytemuck's derive only
+//! supports `#[repr(C)]` structs). The manual impls are sound under the
+//! queue discipline: a queue slot is read only after the producer wrote a
+//! valid value into it and published its index with a release store, so a
+//! read never observes an invalid discriminant. The bytes of a slot must
+//! never be fabricated from an arbitrary source; file corruption is caught
+//! at open by the queue's magic, version, size and capacity validation.
 use crate::address::Address;
 use crate::base::{Hash32, Nonce, Symbol};
 use crate::message::side_path::CancelReason;
 use crate::order::Order;
 use crate::signature::Signature;
 use crate::value::{Price, Quantity, TimestampMs};
+use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
 
 /// Messages the ['SVD_Pretrade'] forwards to the [`SVD_OMS_Master`] via the
 /// share memory SPSC queue: the validated user requests and the
 /// settlement-driven removals. The messages are fixed sized for
 /// preallocation in share memory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(C, u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Zeroable)]
 pub enum OrderMsg {
     /// New Order.
     NewOrder(Order),
@@ -40,8 +59,16 @@ pub enum OrderMsg {
     },
 }
 
+// SAFETY: see the `Pod` contract of this module.
+unsafe impl Pod for OrderMsg {}
+
 /// CancelOrder defines the data required for cancelling an order.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Pod` is implemented manually: the struct is `#[repr(C)]` but the 20-byte
+/// `Address` and the 65-byte `Signature` fields leave padding bytes, which
+/// the derive rejects.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Zeroable)]
 pub struct CancelOrder {
     /// The symbol.
     symbol: Symbol,
@@ -56,6 +83,11 @@ pub struct CancelOrder {
     /// Signature of the operation.
     signature: Signature,
 }
+
+// SAFETY: `CancelOrder` is `#[repr(C)]`; every field is `Pod` and the struct
+// contains no pointers, references or other process-specific addresses. The
+// padding bytes are initialized by the constructors writing the whole value.
+unsafe impl Pod for CancelOrder {}
 
 impl CancelOrder {
     /// Creates a new cancel order event.
@@ -142,7 +174,8 @@ impl CancelOrder {
 /// Trades for an ingress order. The [`SVD_Settlement`] batches it and submit them to
 /// Settlement protocol contract. The listener of the [`SVD_OMS_Master`] can fanout the
 /// trade events to the downstream system for settlement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Pod, Zeroable)]
 pub struct Trade {
     /// Taker order, the ingress order.
     pub taker: Order,
@@ -197,7 +230,8 @@ impl Trade {
 /// The messages of the pipeline between [`SVD_Pretrade`] and
 /// [`SVD_OMS_Master`]: the validated user requests and the settlement-driven
 /// restores. Fixed sized for preallocation in the share memory queues.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(C, u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Zeroable)]
 pub enum PipelineMsg {
     /// A user request (new order / cancel), validated by a handler thread.
     User(OrderMsg),
@@ -214,6 +248,9 @@ pub enum PipelineMsg {
         quantity: Quantity,
     },
 }
+
+// SAFETY: see the `Pod` contract of this module.
+unsafe impl Pod for PipelineMsg {}
 
 #[cfg(test)]
 mod pipeline_tests {
@@ -286,5 +323,33 @@ mod pipeline_tests {
         });
         let bytes = to_vec(&mass).unwrap();
         assert_eq!(mass, from_slice(&bytes).unwrap());
+    }
+
+    /// The queue messages are shared between processes as raw byte images
+    /// (`SpscQueue<T>` requires `T: Pod`): copying a value's bytes into
+    /// another process's address space must reproduce the value exactly.
+    #[test]
+    fn test_messages_are_plain_old_data() {
+        let messages = [
+            PipelineMsg::User(OrderMsg::NewOrder(order(1, 7))),
+            PipelineMsg::User(OrderMsg::CancelBySettlement {
+                user: Address([1; 20]),
+                nonce: Nonce(3),
+                reason: CancelReason::SettlementFailed,
+            }),
+            PipelineMsg::RestoreOrder { order: order(2, 8), quantity: Quantity(3) },
+        ];
+        for message in messages {
+            // An aligned scratch slot, like the pre-allocated queue slots the
+            // messages travel through.
+            let mut slot: Box<PipelineMsg> = Box::new(Zeroable::zeroed());
+            bytemuck::bytes_of_mut(&mut *slot).copy_from_slice(bytemuck::bytes_of(&message));
+            assert_eq!(*slot, message);
+        }
+
+        // The zero image is the default message: the first variant of the
+        // first order kind.
+        let zeroed: PipelineMsg = Zeroable::zeroed();
+        assert_eq!(zeroed, PipelineMsg::User(OrderMsg::NewOrder(Order::default())));
     }
 }

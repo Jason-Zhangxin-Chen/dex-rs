@@ -17,7 +17,17 @@
 //! the persistence), and the consumer advances the read index explicitly with [`ByteSpscQueue::ack`]
 //! once the message is fully processed or delivered to the next stage — the unacked messages stay
 //! in the queue and survive a crash of the consumer.
+//!
+//! The file follows the same initialization protocol and file system
+//! requirements as [`crate::mmap_spsc_fixed::SpscQueue`]: the owner
+//! (`create = true`) holds an exclusive `flock(2)` on the sidecar
+//! `<queue path>.lock` file while it truncates and writes the header, the
+//! attachers hold a shared lock while they open and validate, and the
+//! backing file must live on a local file system with coherent shared
+//! mappings (`/dev/shm` is ideal). The header's magic and version fields
+//! reject files written by an older or foreign layout.
 
+use crate::mmap_spsc_fixed::{flock, lock_path};
 use memmap2::{MmapMut, MmapOptions};
 use std::fmt;
 use std::fs::OpenOptions;
@@ -47,8 +57,10 @@ struct Header {
     capacity: usize,
     /// magic of the byte queue file format.
     magic: u64,
-    /// padding for capacity and magic to occupy a single cache line.
-    _pad: [u8; CACHE_LINE_SIZE - size_of::<usize>() - size_of::<u64>()],
+    /// version of the queue layout.
+    version: u32,
+    /// padding for the read only fields to occupy a single cache line.
+    _pad: [u8; CACHE_LINE_SIZE - size_of::<usize>() - size_of::<u64>() - size_of::<u32>()],
     /// write index in an individual cache line, a byte offset into the data region.
     write_idx: PaddedUsize,
     /// read index in an individual cache line, a byte offset into the data region.
@@ -60,7 +72,8 @@ impl Header {
         Self {
             capacity,
             magic: MAGIC,
-            _pad: [0u8; CACHE_LINE_SIZE - size_of::<usize>() - size_of::<u64>()],
+            version: VERSION,
+            _pad: [0u8; CACHE_LINE_SIZE - size_of::<usize>() - size_of::<u64>() - size_of::<u32>()],
             write_idx: PaddedUsize::new(0),
             read_idx: PaddedUsize::new(0),
         }
@@ -69,6 +82,10 @@ impl Header {
 
 /// The magic of a byte queue file: distinguishes it from the fixed-size queue files.
 const MAGIC: u64 = u64::from_le_bytes(*b"DEXBSQ1\0");
+/// Version of the queue layout: bump when `Header` or the queue semantics
+/// change, so files written by an older build are rejected instead of
+/// misinterpreted.
+const VERSION: u32 = 1;
 /// Header size.
 const HEADER_SIZE: usize = size_of::<Header>();
 /// Size of one frame's length header. The frame size of a payload of `len`
@@ -108,19 +125,49 @@ impl ByteSpscQueue {
     /// Create or open a shared memory byte queue backed by the file at `path`.
     ///
     /// With `create` set, the file is (re)initialized with a fresh header. Otherwise the file
-    /// must exist, must be a byte queue (magic match) and must have been created with the same
-    /// `capacity`, or an error is returned.
+    /// must exist, must be a byte queue of this layout (magic and version match), must be large
+    /// enough to hold the header plus `capacity` data bytes and must have been created with the
+    /// same `capacity`, or an error is returned.
     pub fn open<P: AsRef<Path>>(path: P, capacity: usize, create: bool) -> std::io::Result<Self> {
         assert!(capacity >= 16, "capacity must be at least 16 bytes");
         let total = HEADER_SIZE.checked_add(capacity).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "capacity is too large")
         })?;
 
+        // The initialization protocol shared with the fixed-size queue: the
+        // owner holds an exclusive lock on the sidecar file while it
+        // truncates and writes the header, the attachers take a shared lock
+        // while they open and validate. The lock drops with `lock` whatever
+        // the outcome — also when the process dies.
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path(&path))?;
+        if create {
+            flock(&lock, libc::LOCK_EX)?;
+        } else {
+            flock(&lock, libc::LOCK_SH)?;
+        }
+
         // memory mapped file
         let file = OpenOptions::new().read(true).write(true).create(create).open(path)?;
 
         if create {
             file.set_len(total as u64)?;
+        } else {
+            // the file must already be as large as the layout requires:
+            // mapping past its end would raise SIGBUS on the first access.
+            let file_len = file.metadata()?.len();
+            if file_len < total as u64 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "queue file is {file_len} bytes, smaller than the {total} bytes the layout requires"
+                    ),
+                ));
+            }
         }
 
         // map the share memory to the file.
@@ -133,14 +180,23 @@ impl ByteSpscQueue {
                 std::ptr::write(header_ptr, Header::new(capacity));
             }
         } else {
-            // the file was created by an earlier opener; a magic or capacity mismatch means the
-            // indices can run past the mapped region or address a different file format, so fail
-            // instead of corrupting memory.
+            // the file was created by an earlier opener; a magic, version or capacity mismatch
+            // means the indices can run past the mapped region or address a different file
+            // format, so fail instead of corrupting memory.
             let header = unsafe { &*(mmap.as_ptr() as *const Header) };
             if header.magic != MAGIC {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     "the file is not a byte queue (magic mismatch)",
+                ));
+            }
+            if header.version != VERSION {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "unsupported queue layout version {}, this build expects {VERSION}",
+                        header.version
+                    ),
                 ));
             }
             if header.capacity != capacity {
@@ -178,7 +234,11 @@ impl ByteSpscQueue {
     /// available returns the free bytes of the queue, the spare byte never counted.
     #[inline]
     pub fn available(&self) -> usize {
-        let w = self.header().write_idx.value.load(Ordering::Relaxed);
+        // The caller may be the producer, the consumer or an observer, so
+        // this method cannot know which index is its own: load both with
+        // Acquire. On the caller's own index the stronger ordering is free,
+        // on the peer's index it publishes the peer's data writes.
+        let w = self.header().write_idx.value.load(Ordering::Acquire);
         let r = self.header().read_idx.value.load(Ordering::Acquire);
         let committed = if w >= r { w - r } else { self.capacity - r + w };
         self.capacity - 1 - committed
@@ -323,6 +383,8 @@ impl ByteSpscQueue {
 mod tests {
     use super::*;
     use std::fs;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::FileExt;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
@@ -336,12 +398,13 @@ mod tests {
         std::env::temp_dir().join(format!("dex_ipc_bytes_{}_{}_{}", std::process::id(), tag, seq))
     }
 
-    /// Removes the queue file when dropped.
+    /// Removes the queue file (and its sidecar lock file) when dropped.
     struct TempFile(PathBuf);
 
     impl Drop for TempFile {
         fn drop(&mut self) {
             let _ = fs::remove_file(&self.0);
+            let _ = fs::remove_file(lock_path(&self.0));
         }
     }
 
@@ -361,6 +424,7 @@ mod tests {
         assert_eq!(size_of::<Header>(), 192);
         assert_eq!(std::mem::offset_of!(Header, capacity), 0);
         assert_eq!(std::mem::offset_of!(Header, magic), 8);
+        assert_eq!(std::mem::offset_of!(Header, version), 16);
         assert_eq!(std::mem::offset_of!(Header, write_idx), 64);
         assert_eq!(std::mem::offset_of!(Header, read_idx), 128);
     }
@@ -549,6 +613,70 @@ mod tests {
         let path = temp_path("missing");
         let _guard = TempFile(path.clone());
         assert!(ByteSpscQueue::open(&path, 1024, false).is_err());
+    }
+
+    #[test]
+    fn test_open_wrong_version_fails() {
+        let path = temp_path("badversion");
+        let _guard = TempFile(path.clone());
+        ByteSpscQueue::open(&path, 1024, true).unwrap();
+
+        // bump the layout version in the file header
+        let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.write_at(&2u32.to_ne_bytes(), 16).unwrap();
+
+        let err = match ByteSpscQueue::open(&path, 1024, false) {
+            Ok(_) => panic!("opening a file with a wrong version should fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_open_short_file_fails() {
+        // a file smaller than the header plus the data region: mapping it
+        // past its end would raise SIGBUS on the first access, so fail at open
+        let path = temp_path("short");
+        let _guard = TempFile(path.clone());
+        fs::write(&path, [0u8; 16]).unwrap();
+
+        let err = match ByteSpscQueue::open(&path, 1024, false) {
+            Ok(_) => panic!("opening a file smaller than the layout should fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_attach_blocks_while_the_owner_initializes() {
+        let path = temp_path("initlock");
+        let _guard = TempFile(path.clone());
+        ByteSpscQueue::open(&path, 1024, true).unwrap();
+
+        // hold the owner's exclusive lock while an attach is attempted: the
+        // attach must block on the shared lock until the owner releases it
+        let lock = fs::File::open(lock_path(&path)).unwrap();
+        // SAFETY: LOCK_EX on `lock`'s descriptor.
+        assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let attach_path = path.clone();
+        let attach = thread::spawn(move || {
+            let result = ByteSpscQueue::open(&attach_path, 1024, false);
+            done_tx.send(()).unwrap();
+            result
+        });
+
+        // the attach is still blocked behind the exclusive lock
+        assert!(done_rx.recv_timeout(std::time::Duration::from_millis(100)).is_err());
+
+        // releasing the owner's lock lets the attach through
+        // SAFETY: LOCK_UN on `lock`'s descriptor.
+        assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) }, 0);
+        drop(lock);
+
+        assert!(done_rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok());
+        attach.join().unwrap().unwrap();
     }
 
     #[test]
