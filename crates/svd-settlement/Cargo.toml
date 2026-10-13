@@ -29,7 +29,7 @@ hex = "0.4"
 # The keystore crypto (Web3 Secret Storage v3): RustCrypto crates, all
 # MIT OR Apache-2.0 (deny.toml allow-list).
 scrypt = "0.11"
-aes = "0.8"
+aes = "0.9"
 ctr = "0.9"
 pbkdf2 = "0.12"
 hmac = "0.13"
